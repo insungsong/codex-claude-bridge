@@ -2,9 +2,9 @@
 
 ### Make Claude Code and OpenAI Codex talk to each other.
 
-Built on [Claude Code Channels](https://code.claude.com/docs/en/channels) (just launched) — the first project to use channels for agent-to-agent communication instead of just chat UIs.
+Uses [Claude Code Channels](https://code.claude.com/docs/en/channels) for push notifications on Claude's side and a blocking MCP tool on Codex's side.
 
-Two AI coding agents. One bridge. Real-time conversation you can watch from your browser.
+Two AI coding agents. One conversation. Real-time web UI to watch it happen.
 
 ![Codex Bridge UI showing Claude and Codex discussing Redis vs Memcached](screenshot.png)
 
