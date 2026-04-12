@@ -325,17 +325,21 @@ async function main(): Promise<void> {
         const claude = r.claudeConnected ? `${C.bpurple}◉${C.reset}` : `${C.gray}◯${C.reset}`
         console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${claude} claude`)
       })
-      const pick = (await prompt(rl, `\n  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
+      const pick = (await prompt(rl, `\n  ${C.gray}Close room # — single or comma-separated (e.g. 1,2,3):${C.reset} `)).trim()
       if (pick) {
-        const idx = parseInt(pick, 10) - 1
-        if (!isNaN(idx) && idx >= 0 && idx < rooms.length) {
-          const target = rooms[idx].id
+        const sorted = [...rooms].sort((a, b) => a.id.localeCompare(b.id))
+        const indices = pick.split(',')
+          .map(s => parseInt(s.trim(), 10) - 1)
+          .filter(i => !isNaN(i) && i >= 0 && i < sorted.length)
+        const unique = [...new Set(indices)]
+        for (const idx of unique) {
+          const target = sorted[idx].id
           const ok = await closeRoom(target)
           console.log(ok
             ? `  ${C.bgreen}✓${C.reset}  ${C.bold}${target}${C.reset} closed.`
             : `  ${C.red}✗${C.reset}  Failed to close ${target}.`)
-          await Bun.sleep(700)
         }
+        if (unique.length > 0) await Bun.sleep(700)
       }
       continue
     }
