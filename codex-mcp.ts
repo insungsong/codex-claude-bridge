@@ -23,15 +23,39 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
-const ROOM_ID = process.env.CODEX_BRIDGE_ROOM ?? ''
 const TOTAL_WAIT_MS = 110000
 const POLL_SLICE_MS = 15000
 const POLL_ABORT_GRACE_MS = 3000
 
+// Codex strips most env vars when spawning MCP servers (only HOME/LANG/PATH survive).
+// Fallback: covering-bridge starts Codex via `sh -c 'echo -n roomId > /tmp/codex-bridge-room-$$; exec codex'`.
+// Because exec replaces sh without changing PID, $$ == the node-wrapper PID.
+// codex-mcp.ts traverses: process.ppid (codex binary) → its PPID (node wrapper) → reads the file.
+function getRoomFromPidFile(): string {
+  try {
+    const codexBinaryPid = process.ppid
+    const nodeWrapperPid = parseInt(
+      execFileSync('ps', ['-o', 'ppid=', '-p', String(codexBinaryPid)], { timeout: 2000 })
+        .toString().trim(),
+      10,
+    )
+    if (!nodeWrapperPid || isNaN(nodeWrapperPid)) return ''
+    return readFileSync(`/tmp/codex-bridge-room-${nodeWrapperPid}`, 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || getRoomFromPidFile()
+
 if (!ROOM_ID) {
-  process.stderr.write('codex-mcp: CODEX_BRIDGE_ROOM env var is required\n')
+  process.stderr.write(
+    'codex-mcp: room not found — set CODEX_BRIDGE_ROOM or use covering-bridge to open rooms\n',
+  )
   process.exit(1)
 }
 

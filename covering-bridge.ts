@@ -168,8 +168,11 @@ end tell`
 }
 
 function openRoom(roomId: string): 'auto' | 'manual' {
-  const claudeCmd = `CODEX_BRIDGE_ROOM=${roomId} claude --dangerously-load-development-channels`
-  const codexCmd = `CODEX_BRIDGE_ROOM=${roomId} codex --full-auto`
+  const claudeCmd = `CODEX_BRIDGE_ROOM=${roomId} claude --dangerously-load-development-channels server:codex-bridge`
+  // Codex strips env vars before spawning MCP servers. Workaround: write room ID to a temp file
+  // keyed by the shell's PID ($$). After `exec codex`, that PID becomes the node-wrapper PID —
+  // the same PID that codex-mcp.ts finds as its grandparent (process.ppid → parent PID).
+  const codexCmd = `sh -c 'printf "%s" "${roomId}" > /tmp/codex-bridge-room-$$; exec codex --full-auto'`
   const env = detectEnv()
 
   console.log(`\n  Opening room \x1b[1m${roomId}\x1b[0m...`)
