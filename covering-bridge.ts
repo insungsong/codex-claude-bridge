@@ -111,73 +111,99 @@ async function closeRoom(roomId: string): Promise<boolean> {
 
 // ── Display ──
 
+const CARD = 48  // inner width of each room card
+
 function formatAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000)
   if (secs < 5)    return `${C.bgreen}just now${C.reset}`
-  if (secs < 60)   return `${C.gray}${secs}s ago${C.reset}`
-  if (secs < 3600) return `${C.gray}${Math.floor(secs / 60)}m ago${C.reset}`
-  return `${C.gray}${Math.floor(secs / 3600)}h ago${C.reset}`
+  if (secs < 60)   return `${C.gray}${secs}s${C.reset}`
+  if (secs < 3600) return `${C.gray}${Math.floor(secs / 60)}m${C.reset}`
+  return `${C.gray}${Math.floor(secs / 3600)}h${C.reset}`
 }
 
-function agentDot(connected: boolean, color: string): string {
-  return connected
-    ? `${color}●${C.reset}`
-    : `${C.gray}○${C.reset}`
+/** Row inside a card: pads content to CARD width between │ chars. */
+function cardRow(content: string): string {
+  const pad = CARD - vis(content).length
+  return `  ${C.gray}│${C.reset}${content}${' '.repeat(Math.max(0, pad))}${C.gray}│${C.reset}`
+}
+
+/** Room card with ID embedded in the top border. */
+function roomCard(r: Room): string[] {
+  const age = formatAge(r.lastActivity)
+
+  // Top border: ╭─ ENG-1234 ──...──╮
+  const titleInner = ` ${r.id} `
+  const dashCount  = CARD - titleInner.length - 1  // -1 for leading ─
+  const top = `  ${C.gray}╭─${C.reset}${C.bold}${titleInner}${C.reset}${C.gray}${'─'.repeat(dashCount)}╮${C.reset}`
+
+  // Agent status pills
+  function pill(connected: boolean, label: string, onColor: string): string {
+    return connected
+      ? `${onColor}◉${C.reset} ${onColor}${label}${C.reset}  ${C.dim}online${C.reset} `
+      : `${C.gray}◯ ${label}  offline${C.reset}`
+  }
+  const codexPill  = pill(r.codexConnected,  'codex ', C.bgreen)
+  const claudePill = pill(r.claudeConnected, 'claude', C.bpurple)
+
+  // Status row: 4 leading spaces, pills separated, age right-aligned
+  const statusContent  = `    ${codexPill}    ${claudePill}    `
+  const ageContent     = `    ${age}  `
+
+  // Bottom border
+  const bottom = `  ${C.gray}╰${'─'.repeat(CARD + 1)}╯${C.reset}`
+
+  return [
+    top,
+    cardRow(ageContent),
+    cardRow(statusContent),
+    bottom,
+  ]
 }
 
 function printRooms(rooms: Room[]): void {
   console.clear()
 
-  // ── Header box ──
-  console.log(boxTop())
-  console.log(boxRow(''))
-  console.log(boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.gray}${VERSION}${C.reset}`))
-  console.log(boxRow(`     ${C.dim}multi-room bridge${C.reset}`))
-  console.log(boxRow(''))
-  console.log(boxBottom())
+  // ── Header ──
+  console.log()
+  console.log(`  ${C.gray}╭${'─'.repeat(BOX)}╮${C.reset}`)
+  console.log(`  ${C.gray}│${C.reset}${' '.repeat(BOX)}${C.gray}│${C.reset}`)
+  // Logo line using block chars
+  console.log(`  ${C.gray}│${C.reset}   ${C.bcyan}▗▄▄▖${C.reset}  ${C.bold}${C.white}Codex · Claude Bridge${C.reset}${' '.repeat(BOX - 29)}${C.gray}│${C.reset}`)
+  console.log(`  ${C.gray}│${C.reset}   ${C.cyan}▐▌◈▐▌${C.reset}  ${C.dim}multi-room agent bridge  ${VERSION}${C.reset}${' '.repeat(BOX - 37)}${C.gray}│${C.reset}`)
+  console.log(`  ${C.gray}│${C.reset}   ${C.bcyan}▝▀▀▘${C.reset}${' '.repeat(BOX - 6)}${C.gray}│${C.reset}`)
+  console.log(`  ${C.gray}│${C.reset}${' '.repeat(BOX)}${C.gray}│${C.reset}`)
+  console.log(`  ${C.gray}╰${'─'.repeat(BOX)}╯${C.reset}`)
   console.log()
 
-  // ── Status line ──
-  const roomCount = rooms.length === 0
+  // ── Sub-header ──
+  const roomStr = rooms.length === 0
     ? `${C.gray}no active rooms${C.reset}`
-    : `${C.bold}${rooms.length}${C.reset} ${rooms.length === 1 ? 'room' : 'rooms'} active`
-  console.log(`  ${roomCount}  ${C.gray}·${C.reset}  ${C.dim}${BRIDGE_URL}${C.reset}`)
+    : `${C.bold}${C.white}${rooms.length}${C.reset} ${C.gray}room${rooms.length > 1 ? 's' : ''}${C.reset}`
+  console.log(`  ${C.dim}${BRIDGE_URL}${C.reset}  ${C.gray}·${C.reset}  ${roomStr}`)
   console.log()
 
-  // ── Room list ──
+  // ── Room cards ──
   if (rooms.length === 0) {
-    console.log(`  ${C.gray}No rooms yet. Press ${C.reset}${C.bold}o${C.reset}${C.gray} to open one.${C.reset}`)
+    console.log(`  ${C.gray}  No rooms yet. Press ${C.reset}${C.bold}o${C.reset}${C.gray} to open one.${C.reset}`)
     console.log()
   } else {
     for (const r of rooms) {
-      const claude = agentDot(r.claudeConnected, C.bpurple)
-      const codex  = agentDot(r.codexConnected,  C.bgreen)
-
-      const claudeLabel = r.claudeConnected
-        ? `${C.purple}claude${C.reset}`
-        : `${C.gray}claude${C.reset}`
-      const codexLabel = r.codexConnected
-        ? `${C.green}codex${C.reset}`
-        : `${C.gray}codex${C.reset}`
-
-      const id  = rpad(`${C.bold}${r.id}${C.reset}`, 22)
-      const age = formatAge(r.lastActivity)
-
-      console.log(`  ${id}  ${codex} ${codexLabel}   ${claude} ${claudeLabel}   ${age}`)
+      for (const line of roomCard(r)) console.log(line)
+      console.log()
     }
-    console.log()
   }
 
   // ── Footer ──
-  console.log(divider())
+  const footerW = CARD + 2
   const keys = [
-    `${C.bold}o${C.reset} open`,
-    `${C.bold}c${C.reset} close`,
-    `${C.bold}r${C.reset} refresh`,
-    `${C.bold}q${C.reset} quit`,
-  ]
-  console.log(`  ${keys.join(`  ${C.gray}·${C.reset}  `)}`)
-  console.log(divider())
+    `${C.bold}o${C.reset}  open`,
+    `${C.bold}c${C.reset}  close`,
+    `${C.bold}r${C.reset}  refresh`,
+    `${C.bold}q${C.reset}  quit`,
+  ].join(`  ${C.gray}│${C.reset}  `)
+  console.log(`  ${C.gray}${'─'.repeat(footerW)}${C.reset}`)
+  console.log(`   ${keys}`)
+  console.log(`  ${C.gray}${'─'.repeat(footerW)}${C.reset}`)
   console.log()
 }
 
@@ -314,9 +340,9 @@ async function main(): Promise<void> {
       }
       console.log()
       rooms.forEach((r, i) => {
-        const claude = agentDot(r.claudeConnected, C.bpurple)
-        const codex  = agentDot(r.codexConnected,  C.bgreen)
-        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${r.id}   ${codex} ${claude}`)
+        const codex  = r.codexConnected  ? `${C.bgreen}◉${C.reset}`  : `${C.gray}◯${C.reset}`
+        const claude = r.claudeConnected ? `${C.bpurple}◉${C.reset}` : `${C.gray}◯${C.reset}`
+        console.log(`  ${C.gray}[${C.reset}${C.bold}${i + 1}${C.reset}${C.gray}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${claude} claude`)
       })
       console.log()
       const pick = (await prompt(rl, `  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
