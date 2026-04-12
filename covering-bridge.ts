@@ -3,6 +3,7 @@
  * covering-bridge — Room manager CLI for the Codex-Claude multi-room bridge.
  */
 
+import { createInterface } from 'readline'
 import { spawnSync } from 'child_process'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
@@ -30,9 +31,7 @@ const C = {
   bpurple: '\x1b[95m',
   yellow:  '\x1b[33m',
   gray:    '\x1b[90m',
-  white:   '\x1b[97m',
   red:     '\x1b[31m',
-  cyan:    '\x1b[36m',
 }
 
 function vis(s: string) { return s.replace(/\x1b\[[0-9;]*m/g, '') }
@@ -49,69 +48,6 @@ function boxRow(content: string) {
   return `  ${C.gray}│${C.reset}${content}${' '.repeat(Math.max(0, pad))}${C.gray}│${C.reset}`
 }
 function divider() { return `  ${C.gray}${'─'.repeat(BOX)}${C.reset}` }
-
-// ── Rabbit animation frames ──
-// 6 frames: sit → crouch → jump low → jump high → fall → land
-
-const RABBIT_FRAMES: string[][] = [
-  // 0: sitting, relaxed
-  [
-    `  ${C.bgreen} (\\ /)${C.reset}`,
-    `  ${C.bgreen}( •ω• )${C.reset}`,
-    `  ${C.bgreen}づ${C.yellow}♡${C.reset}${C.bgreen}⊂ )${C.reset}`,
-    `  ${C.gray}  |  |${C.reset}`,
-    `  ${C.gray} (_(_)${C.reset}`,
-    `  ${C.yellow}   ♪${C.reset}`,
-  ],
-  // 1: crouch (preparing to jump)
-  [
-    `  ${C.bgreen} (\\ /)${C.reset}`,
-    `  ${C.bgreen}( •ω• )${C.reset}`,
-    `  ${C.bgreen}づ${C.yellow}♡${C.reset}${C.bgreen}⊂ )${C.reset}`,
-    `  ${C.gray}  ) )${C.reset}`,
-    `  ${C.gray} (__))${C.reset}`,
-    ``,
-  ],
-  // 2: jumping (low)
-  [
-    `  ${C.bgreen} /\\ /\\${C.reset}`,
-    `  ${C.bgreen}( •ω• )${C.reset}`,
-    `  ${C.bgreen}づ${C.yellow}♡${C.reset}${C.bgreen}⊂ )${C.reset}`,
-    `  ${C.gray}  ~ ~${C.reset}`,
-    ``,
-    `  ${C.yellow}  ♪${C.reset}`,
-  ],
-  // 3: peak of jump
-  [
-    `  ${C.bgreen} /\\ /\\${C.reset}`,
-    `  ${C.bgreen}(*ω*↑)${C.reset}`,
-    `  ${C.bgreen} づ${C.yellow}♡${C.reset}${C.bgreen}⊂)${C.reset}`,
-    ``,
-    `  ${C.yellow}  ✦${C.reset}`,
-    `  ${C.yellow} ♪ ♪${C.reset}`,
-  ],
-  // 4: falling
-  [
-    `  ${C.bgreen} /\\ /\\${C.reset}`,
-    `  ${C.bgreen}( •ω• )${C.reset}`,
-    `  ${C.bgreen}づ${C.yellow}♡${C.reset}${C.bgreen}⊂ )${C.reset}`,
-    `  ${C.gray}  \\ \\${C.reset}`,
-    ``,
-    `  ${C.yellow}  ♪${C.reset}`,
-  ],
-  // 5: landing (happy)
-  [
-    `  ${C.bgreen} (\\ /)${C.reset}`,
-    `  ${C.bgreen}( >ω<)${C.reset}`,
-    `  ${C.bgreen}づ${C.yellow}♡${C.reset}${C.bgreen}⊂ )${C.reset}`,
-    `  ${C.gray}  |  |${C.reset}`,
-    `  ${C.gray} (_(_)${C.reset}`,
-    `  ${C.yellow} ～♪${C.reset}`,
-  ],
-]
-
-// Frame timing: longer pause on sit/land, quick on jump
-const FRAME_DURATIONS = [500, 150, 200, 300, 200, 400]  // ms per frame
 
 // ── Bridge server management ──
 
@@ -173,29 +109,15 @@ function agentDot(connected: boolean, onColor: string): string {
   return connected ? `${onColor}●${C.reset}` : `${C.gray}○${C.reset}`
 }
 
-/** Print two line arrays side by side. */
-function sideBySide(left: string[], right: string[], leftWidth: number): void {
-  const rows = Math.max(left.length, right.length)
-  for (let i = 0; i < rows; i++) {
-    const l = left[i]  ?? ''
-    const r = right[i] ?? ''
-    process.stdout.write(l + ' '.repeat(Math.max(0, leftWidth - vis(l).length)) + r + '\n')
-  }
-}
-
-function renderScreen(rooms: Room[], frame: number): void {
+function printRooms(rooms: Room[]): void {
   console.clear()
-
-  // ── Header + Rabbit (side by side) ──
-  const leftWidth = BOX + 4
-  const headerLines = [
-    boxTop(),
-    boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.dim}룸 관리 대시보드${C.reset}  ${C.gray}${VERSION}${C.reset}`),
-    boxRow(`     ${C.dim}multi-room agent bridge${C.reset}`),
-    boxBottom(),
-  ]
   console.log()
-  sideBySide(headerLines, RABBIT_FRAMES[frame], leftWidth)
+
+  // ── Header ──
+  console.log(boxTop())
+  console.log(boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.dim}룸 관리 대시보드${C.reset}  ${C.gray}${VERSION}${C.reset}`))
+  console.log(boxRow(`     ${C.dim}multi-room agent bridge${C.reset}`))
+  console.log(boxBottom())
   console.log()
 
   // ── Status ──
@@ -232,7 +154,6 @@ function renderScreen(rooms: Room[], frame: number): void {
   console.log(`  ${keys.join(`  ${C.gray}·${C.reset}  `)}`)
   console.log(divider())
   console.log()
-  process.stdout.write(`  ${C.bcyan}›${C.reset} `)
 }
 
 // ── Terminal opening ──
@@ -283,30 +204,10 @@ function openRoom(roomId: string): 'auto' | 'manual' {
   return 'manual'
 }
 
-// ── Interactive prompt (temporarily suspends animation) ──
+// ── Interactive prompt ──
 
-/** Read a line in raw mode without touching the stdin stream. */
-function readLine(question: string): Promise<string> {
-  return new Promise(resolve => {
-    process.stdout.write(`\n  ${question}`)
-    let buf = ''
-    function onKey(key: string) {
-      if (key === '\r' || key === '\n') {
-        process.stdin.removeListener('data', onKey)
-        process.stdout.write('\n')
-        resolve(buf)
-      } else if (key === '\u007f' || key === '\b') {
-        if (buf.length > 0) { buf = buf.slice(0, -1); process.stdout.write('\b \b') }
-      } else if (key === '\u0003') {  // Ctrl+C inside prompt → cancel
-        process.stdin.removeListener('data', onKey)
-        process.stdout.write('\n')
-        resolve('')
-      } else if (key >= ' ') {
-        buf += key; process.stdout.write(key)
-      }
-    }
-    process.stdin.on('data', onKey)
-  })
+function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
+  return new Promise(resolve => rl.question(question, resolve))
 }
 
 // ── Main ──
@@ -321,105 +222,66 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
-  let rooms = await getRooms()
-  let frame = 0
-  let animating = true
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
 
-  // ── Room data fetch — every 1s (age display + connection status) ──
-  const pollRooms = setInterval(async () => {
-    if (animating) rooms = await getRooms()
-  }, 1000)
+  while (true) {
+    const rooms = await getRooms()
+    printRooms(rooms)
 
-  // ── Animation loop — per-frame timing for rabbit ──
-  function tick() {
-    if (!animating) return
-    renderScreen(rooms, frame)
-    frame = (frame + 1) % RABBIT_FRAMES.length
-    setTimeout(tick, FRAME_DURATIONS[frame])
-  }
-  tick()
+    const choice = (await prompt(rl, `  ${C.bcyan}›${C.reset} `)).trim().toLowerCase()
 
-  // ── Raw mode key handling ──
-  process.stdin.setRawMode(true)
-  process.stdin.resume()
-  process.stdin.setEncoding('utf8')
-
-  /** Pause animation and read a line in raw mode (no stream teardown). */
-  async function suspendAndPrompt(question: string): Promise<string> {
-    animating = false
-    const answer = await readLine(question)
-    animating = true
-    tick()
-    return answer
-  }
-
-  process.stdin.on('data', async (key: string) => {
-    if (!animating) return
-    const k = key.toLowerCase()
-
-    // Ctrl+C or q → quit
-    if (k === '\u0003' || k === 'q') {
-      animating = false
-      clearInterval(pollRooms)
-      process.stdin.setRawMode(false)
-      console.clear()
-      console.log(`\n  ${C.dim}bye. 🐇${C.reset}\n`)
+    if (choice === 'q' || choice === 'quit') {
+      rl.close()
+      console.log(`\n  ${C.dim}bye.${C.reset}\n`)
       process.exit(0)
     }
 
-    if (k === 'r') {
-      rooms = await getRooms()
-      renderScreen(rooms, frame)
-      return
-    }
+    if (choice === 'r' || choice === 'refresh') continue
 
-    if (k === 'o') {
-      const ticketRaw = await suspendAndPrompt(`${C.gray}Room ID (e.g. ENG-1234):${C.reset} `)
-      const ticket = ticketRaw.trim().toUpperCase()
-      if (!ticket) return
+    if (choice === 'o' || choice === 'open') {
+      const ticketRaw = (await prompt(rl, `  ${C.gray}Room ID (e.g. ENG-1234):${C.reset} `)).trim()
+      const ticket = ticketRaw.toUpperCase()
+      if (!ticket) { console.log(`  ${C.gray}Cancelled.${C.reset}`); continue }
       if (rooms.find(r => r.id === ticket)) {
-        process.stdout.write(`  ${C.yellow}⚠${C.reset}  Room ${C.bold}${ticket}${C.reset} already exists.\n`)
+        console.log(`  ${C.yellow}⚠${C.reset}  Room ${C.bold}${ticket}${C.reset} already exists.`)
         await Bun.sleep(900)
-        return
+        continue
       }
       await fetch(`${BRIDGE_URL}/api/rooms/${encodeURIComponent(ticket)}`, { method: 'POST' }).catch(() => {})
       const mode = openRoom(ticket)
       if (mode === 'manual') {
-        process.stdout.write(`\n  ${C.gray}[claude]${C.reset}  bridge-claude ${ticket}\n`)
-        process.stdout.write(`  ${C.gray}[codex] ${C.reset}  bridge-codex ${ticket}\n`)
-        await suspendAndPrompt(`${C.gray}Press Enter once both terminals are running...${C.reset}`)
+        console.log(`\n  ${C.gray}[claude]${C.reset}  bridge-claude ${ticket}`)
+        console.log(`  ${C.gray}[codex] ${C.reset}  bridge-codex ${ticket}\n`)
+        await prompt(rl, `  ${C.gray}Press Enter once both terminals are running...${C.reset} `)
       } else {
         await Bun.sleep(800)
       }
-      return
+      continue
     }
 
-    if (k === 'c') {
-      if (rooms.length === 0) return
-      animating = false
-      console.clear()
+    if (choice === 'c' || choice === 'close') {
+      if (rooms.length === 0) { console.log(`  ${C.gray}No rooms to close.${C.reset}`); await Bun.sleep(700); continue }
       console.log()
       rooms.forEach((r, i) => {
         const codex  = r.codexConnected  ? `${C.bgreen}◉${C.reset}`  : `${C.gray}◯${C.reset}`
         const claude = r.claudeConnected ? `${C.bpurple}◉${C.reset}` : `${C.gray}◯${C.reset}`
         console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${claude} claude`)
       })
-      const pick = (await readLine(`${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
+      const pick = (await prompt(rl, `\n  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
       if (pick) {
         const idx = parseInt(pick, 10) - 1
         if (!isNaN(idx) && idx >= 0 && idx < rooms.length) {
           const target = rooms[idx].id
           const ok = await closeRoom(target)
-          process.stdout.write(ok
-            ? `  ${C.bgreen}✓${C.reset}  ${C.bold}${target}${C.reset} closed.\n`
-            : `  ${C.red}✗${C.reset}  Failed.\n`)
+          console.log(ok
+            ? `  ${C.bgreen}✓${C.reset}  ${C.bold}${target}${C.reset} closed.`
+            : `  ${C.red}✗${C.reset}  Failed to close ${target}.`)
           await Bun.sleep(700)
         }
       }
-      animating = true
-      tick()
+      continue
     }
-  })
+  }
 }
 
 await main()
