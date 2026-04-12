@@ -20,11 +20,59 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
+import { execFileSync } from 'child_process'
+import { readFileSync } from 'fs'
 
-const ROOM_ID = process.env.CODEX_BRIDGE_ROOM ?? ''
+// Claude Code strips env vars when spawning MCP servers.
+// Workaround: covering-bridge runs `sh -c 'printf "roomId" > /tmp/claude-bridge-room-$$; exec claude ...'`
+// exec replaces sh with node-claude, keeping the same PID (X).
+// We try reading the file at each level of the PPID chain until we find it.
+function readPidFile(pid: number): string {
+  try {
+    return readFileSync(`/tmp/claude-bridge-room-${pid}`, 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
+function getParentPid(pid: number): number {
+  try {
+    return parseInt(
+      execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { timeout: 2000 }).toString().trim(),
+      10,
+    )
+  } catch {
+    return 0
+  }
+}
+
+function getRoomAndTokenFromPidFile(): { roomId: string; token: string } {
+  // Walk up 3 levels of the process tree to find the PID file
+  let pid = process.ppid ?? 0
+  for (let i = 0; i < 3; i++) {
+    if (!pid || isNaN(pid)) break
+    const content = readPidFile(pid)
+    if (content) {
+      const idx = content.indexOf(':')
+      if (idx === -1) return { roomId: content, token: '' }
+      return { roomId: content.slice(0, idx), token: content.slice(idx + 1) }
+    }
+    pid = getParentPid(pid)
+  }
+  return { roomId: '', token: '' }
+}
+
+const { roomId: pidFileRoom } = getRoomAndTokenFromPidFile()
+const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || pidFileRoom
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const POLL_TIMEOUT_MS = 30000
 const POLL_BACKOFF_MS = 1000
+
+// DEBUG — remove after diagnosis
+const p1 = process.ppid ?? 0
+const p2 = getParentPid(p1)
+const p3 = getParentPid(p2)
+process.stderr.write(`[claude-mcp] pid=${process.pid} ppid=${p1}(${readPidFile(p1)||'?'}) gp=${p2}(${readPidFile(p2)||'?'}) ggp=${p3}(${readPidFile(p3)||'?'}) ROOM_ID="${ROOM_ID}"\n`)
 
 if (!ROOM_ID) {
   process.stderr.write('claude-mcp: CODEX_BRIDGE_ROOM env var is required\n')
@@ -136,19 +184,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
-// Register with bridge-server
-async function register() {
+const CLAUDE_HEARTBEAT_INTERVAL_MS = 3000
+
+async function heartbeat() {
   try {
-    await fetch(`${BASE}/claude/connect`, { method: 'POST' })
-    process.stderr.write(`[claude-mcp] registered room: ${ROOM_ID}\n`)
-  } catch {
-    process.stderr.write(`[claude-mcp] bridge not reachable at ${BRIDGE_URL}\n`)
-  }
+    const res = await fetch(`${BASE}/claude/connect`, { method: 'POST', signal: AbortSignal.timeout(5000) })
+    if (res.status === 404) {
+      process.stderr.write(`[claude-mcp] room ${ROOM_ID} closed — exiting\n`)
+      process.exit(0)
+    }
+  } catch {}
 }
 
 async function unregister() {
   try {
-    await fetch(`${BASE}/claude/connect`, { method: 'DELETE' })
+    await fetch(`${BASE}/claude/connect`, { method: 'DELETE', signal: AbortSignal.timeout(3000) })
   } catch {}
 }
 
@@ -199,6 +249,7 @@ process.on('exit', () => { void unregister() })
 process.on('SIGINT', () => { void unregister().finally(() => process.exit(0)) })
 process.on('SIGTERM', () => { void unregister().finally(() => process.exit(0)) })
 
-await register()
+await heartbeat()  // immediate ✓ on connect
+setInterval(heartbeat, CLAUDE_HEARTBEAT_INTERVAL_MS)  // keep alive every 10s
 process.stderr.write(`[claude-mcp] polling room ${ROOM_ID} at ${BRIDGE_URL}\n`)
 void pollLoop()

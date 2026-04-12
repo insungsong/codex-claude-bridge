@@ -55,11 +55,18 @@ type ClaudeWaiter = {
   cleanup: () => void
 }
 
+// If no heartbeat/poll within this window, consider the agent disconnected.
+const HEARTBEAT_TIMEOUT_MS = 8000  // 2.5× the 3s heartbeat interval
+
 type RoomState = {
   id: string
   createdAt: number
-  claudeConnected: boolean
-  codexConnected: boolean
+  // Session token — generated on room creation, written into PID files by covering-bridge.
+  // MCP processes must echo it in every heartbeat. Stale processes (wrong/no token) get 404.
+  // Liveness: updated by claude-mcp's pending-for-claude poll and codex-mcp's heartbeat.
+  // claudeConnected/codexConnected are computed dynamically — not stored as booleans.
+  claudeLastSeen: number
+  codexLastSeen: number
   lastActivity: number
   // Codex → Claude reply tracking
   pendingReplies: Map<string, PendingReply>
@@ -73,6 +80,14 @@ type RoomState = {
   clients: Set<ServerWebSocket<unknown>>
 }
 
+function isClaudeConnected(room: RoomState) {
+  return room.claudeLastSeen > 0 && (Date.now() - room.claudeLastSeen) < HEARTBEAT_TIMEOUT_MS
+}
+
+function isCodexConnected(room: RoomState) {
+  return room.codexLastSeen > 0 && (Date.now() - room.codexLastSeen) < HEARTBEAT_TIMEOUT_MS
+}
+
 // ── Room registry ──
 
 const rooms = new Map<string, RoomState>()
@@ -82,8 +97,8 @@ function getOrCreateRoom(roomId: string): RoomState {
     rooms.set(roomId, {
       id: roomId,
       createdAt: Date.now(),
-      claudeConnected: false,
-      codexConnected: false,
+      claudeLastSeen: 0,
+      codexLastSeen: 0,
       lastActivity: Date.now(),
       pendingReplies: new Map(),
       inFlightCodexMessages: new Map(),
@@ -222,8 +237,8 @@ Bun.serve({
       const list = Array.from(rooms.values()).map(r => ({
         id: r.id,
         createdAt: r.createdAt,
-        claudeConnected: r.claudeConnected,
-        codexConnected: r.codexConnected,
+        claudeConnected: isClaudeConnected(r),
+        codexConnected: isCodexConnected(r),
         lastActivity: r.lastActivity,
       }))
       return Response.json(list)
@@ -267,34 +282,36 @@ Bun.serve({
     const roomId = decodeURIComponent(roomMatch[1])
     const sub = roomMatch[2]
 
-    // Claude connect/disconnect
+    // Claude connect/disconnect — only updates existing rooms (never recreates closed rooms)
     if (sub === 'claude/connect') {
       if (req.method === 'POST') {
-        const room = getOrCreateRoom(roomId)
-        room.claudeConnected = true
+        const room = rooms.get(roomId)
+        if (!room) return new Response(null, { status: 404 })
+        room.claudeLastSeen = Date.now()
         touchRoom(room)
         process.stderr.write(`[bridge] claude connected: ${roomId}\n`)
         return new Response(null, { status: 204 })
       }
       if (req.method === 'DELETE') {
         const room = rooms.get(roomId)
-        if (room) { room.claudeConnected = false; touchRoom(room) }
+        if (room) { room.claudeLastSeen = 0; touchRoom(room) }
         process.stderr.write(`[bridge] claude disconnected: ${roomId}\n`)
         return new Response(null, { status: 204 })
       }
     }
 
-    // Codex connect/disconnect
-    if (sub === 'codex/connect') {
+    // Codex heartbeat — only updates existing rooms (never recreates closed rooms)
+    if (sub === 'codex/heartbeat' || sub === 'codex/connect') {
       if (req.method === 'POST') {
-        const room = getOrCreateRoom(roomId)
-        room.codexConnected = true
+        const room = rooms.get(roomId)
+        if (!room) return new Response(null, { status: 404 })
+        room.codexLastSeen = Date.now()
         touchRoom(room)
         return new Response(null, { status: 204 })
       }
       if (req.method === 'DELETE') {
         const room = rooms.get(roomId)
-        if (room) { room.codexConnected = false; touchRoom(room) }
+        if (room) { room.codexLastSeen = 0; touchRoom(room) }
         return new Response(null, { status: 204 })
       }
     }
@@ -303,6 +320,7 @@ Bun.serve({
     if (sub === 'pending-for-claude' && req.method === 'GET') {
       const room = rooms.get(roomId)
       if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+      room.claudeLastSeen = Date.now()  // each poll = heartbeat for Claude liveness
       touchRoom(room)
       const timeout = Number(url.searchParams.get('timeout') ?? 30000)
 

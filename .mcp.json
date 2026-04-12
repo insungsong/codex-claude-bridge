@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "codex-bridge": {
+      "type": "stdio",
       "command": "bun",
-      "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}", "--shell=bun", "--silent", "start"]
+      "args": ["/Users/SONGINSUNG/Documents/codex-claude-bridge/claude-mcp.ts"]
     }
   }
 }

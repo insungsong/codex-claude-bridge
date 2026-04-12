@@ -32,10 +32,10 @@ const POLL_SLICE_MS = 15000
 const POLL_ABORT_GRACE_MS = 3000
 
 // Codex strips most env vars when spawning MCP servers (only HOME/LANG/PATH survive).
-// Fallback: covering-bridge starts Codex via `sh -c 'echo -n roomId > /tmp/codex-bridge-room-$$; exec codex'`.
+// Fallback: covering-bridge starts Codex via `sh -c 'printf "roomId:token" > /tmp/codex-bridge-room-$$; exec codex'`.
 // Because exec replaces sh without changing PID, $$ == the node-wrapper PID.
 // codex-mcp.ts traverses: process.ppid (codex binary) → its PPID (node wrapper) → reads the file.
-function getRoomFromPidFile(): string {
+function getRoomAndTokenFromPidFile(): { roomId: string; token: string } {
   try {
     const codexBinaryPid = process.ppid
     const nodeWrapperPid = parseInt(
@@ -43,14 +43,18 @@ function getRoomFromPidFile(): string {
         .toString().trim(),
       10,
     )
-    if (!nodeWrapperPid || isNaN(nodeWrapperPid)) return ''
-    return readFileSync(`/tmp/codex-bridge-room-${nodeWrapperPid}`, 'utf8').trim()
+    if (!nodeWrapperPid || isNaN(nodeWrapperPid)) return { roomId: '', token: '' }
+    const content = readFileSync(`/tmp/codex-bridge-room-${nodeWrapperPid}`, 'utf8').trim()
+    const idx = content.indexOf(':')
+    if (idx === -1) return { roomId: content, token: '' }
+    return { roomId: content.slice(0, idx), token: content.slice(idx + 1) }
   } catch {
-    return ''
+    return { roomId: '', token: '' }
   }
 }
 
-const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || getRoomFromPidFile()
+const { roomId: pidFileRoom } = getRoomAndTokenFromPidFile()
+const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || pidFileRoom
 
 if (!ROOM_ID) {
   process.stderr.write(
@@ -245,16 +249,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-// Register/unregister Codex connection status
-async function register() {
+const HEARTBEAT_INTERVAL_MS = 3000
+
+async function heartbeat() {
   try {
-    await fetch(`${BASE}/codex/connect`, { method: 'POST' })
+    const res = await fetch(`${BASE}/codex/heartbeat`, { method: 'POST', signal: AbortSignal.timeout(5000) })
+    if (res.status === 404) {
+      process.stderr.write(`[codex-mcp] room ${ROOM_ID} closed — exiting\n`)
+      process.exit(0)
+    }
   } catch {}
 }
 
 async function unregister() {
   try {
-    await fetch(`${BASE}/codex/connect`, { method: 'DELETE' })
+    await fetch(`${BASE}/codex/heartbeat`, { method: 'DELETE', signal: AbortSignal.timeout(3000) })
   } catch {}
 }
 
@@ -263,5 +272,6 @@ process.on('SIGINT', () => { void unregister().finally(() => process.exit(0)) })
 process.on('SIGTERM', () => { void unregister().finally(() => process.exit(0)) })
 
 await mcp.connect(new StdioServerTransport())
-await register()
+await heartbeat()  // immediate ✓ on connect
+setInterval(heartbeat, HEARTBEAT_INTERVAL_MS)  // keep alive every 30s
 process.stderr.write(`codex-bridge-client: ready  room=${ROOM_ID}  bridge=${BRIDGE_URL}\n`)
