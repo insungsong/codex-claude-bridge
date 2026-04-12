@@ -1,0 +1,2 @@
+#!/bin/sh
+exec bun /Users/SONGINSUNG/Documents/codex-claude-bridge/covering-bridge.ts "$@"
