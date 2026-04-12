@@ -1,0 +1,204 @@
+#!/usr/bin/env bun
+/**
+ * Codex Bridge — Claude-side MCP relay.
+ *
+ * Runs as Claude Code's channel plugin (stdio MCP server).
+ * Connects to bridge-server.ts via HTTP to relay messages.
+ *
+ * Required env vars:
+ *   CODEX_BRIDGE_ROOM  — room ID, e.g. "ENG-1234"
+ *   CODEX_BRIDGE_URL   — bridge server URL (default: http://localhost:8788)
+ *
+ * Flow:
+ *   Codex → bridge-server → pending-for-claude → [this polls] → mcp.notification → Claude
+ *   Claude → reply tool → [this] → POST /from-claude → bridge-server → Codex poll
+ */
+
+import { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js'
+
+const ROOM_ID = process.env.CODEX_BRIDGE_ROOM ?? ''
+const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
+const POLL_TIMEOUT_MS = 30000
+const POLL_BACKOFF_MS = 1000
+
+if (!ROOM_ID) {
+  process.stderr.write('claude-mcp: CODEX_BRIDGE_ROOM env var is required\n')
+  process.exit(1)
+}
+
+const BASE = `${BRIDGE_URL}/api/rooms/${encodeURIComponent(ROOM_ID)}`
+
+// ── MCP server ──
+
+const mcp = new Server(
+  { name: `codex-bridge:${ROOM_ID}`, version: '0.3.0' },
+  {
+    capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
+    instructions: [
+      `You are connected to Codex Bridge, room ${ROOM_ID}.`,
+      'Messages from Codex arrive as <channel source="codex-bridge" sender="codex" ...>.',
+      'Reply with the reply tool. ALWAYS pass reply_to with the message_id — critical for routing.',
+      `Web UI: ${BRIDGE_URL}`,
+    ].join('\n'),
+  },
+)
+
+mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'reply',
+      description: `Send a reply through Codex Bridge (room: ${ROOM_ID}). Pass reply_to with the message_id so the response routes back to Codex.`,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          reply_to: { type: 'string', description: 'message_id of the message being replied to' },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'send_to_codex',
+      description: 'Proactively send a message to Codex without waiting for Codex to ask first.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string', description: 'Message to send to Codex' },
+        },
+        required: ['text'],
+      },
+    },
+    {
+      name: 'edit_message',
+      description: 'Edit a previously sent message in the web UI.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string' },
+          text: { type: 'string' },
+        },
+        required: ['message_id', 'text'],
+      },
+    },
+  ],
+}))
+
+mcp.setRequestHandler(CallToolRequestSchema, async req => {
+  const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  try {
+    switch (req.params.name) {
+      case 'reply': {
+        const text = args.text as string
+        const replyTo = args.reply_to as string | undefined
+        const res = await fetch(`${BASE}/from-claude`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text, replyTo, proactive: false }),
+        })
+        if (!res.ok) throw new Error(`bridge error: ${res.status}`)
+        const { id } = await res.json() as { id: string }
+        return { content: [{ type: 'text', text: `sent (${id})` }] }
+      }
+
+      case 'send_to_codex': {
+        const text = args.text as string
+        const res = await fetch(`${BASE}/from-claude`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text, proactive: true }),
+        })
+        if (!res.ok) throw new Error(`bridge error: ${res.status}`)
+        const { id } = await res.json() as { id: string }
+        return { content: [{ type: 'text', text: `sent to codex (${id})` }] }
+      }
+
+      case 'edit_message': {
+        // Best-effort: no edit endpoint on bridge-server yet, log locally
+        process.stderr.write(`[claude-mcp] edit_message not yet forwarded to bridge\n`)
+        return { content: [{ type: 'text', text: 'ok' }] }
+      }
+
+      default:
+        return { content: [{ type: 'text', text: `unknown: ${req.params.name}` }], isError: true }
+    }
+  } catch (err) {
+    return {
+      content: [{ type: 'text', text: `${req.params.name}: ${err instanceof Error ? err.message : err}` }],
+      isError: true,
+    }
+  }
+})
+
+await mcp.connect(new StdioServerTransport())
+
+// Register with bridge-server
+async function register() {
+  try {
+    await fetch(`${BASE}/claude/connect`, { method: 'POST' })
+    process.stderr.write(`[claude-mcp] registered room: ${ROOM_ID}\n`)
+  } catch {
+    process.stderr.write(`[claude-mcp] bridge not reachable at ${BRIDGE_URL}\n`)
+  }
+}
+
+async function unregister() {
+  try {
+    await fetch(`${BASE}/claude/connect`, { method: 'DELETE' })
+  } catch {}
+}
+
+// Deliver a message from Codex into Claude's session via channel notification
+async function deliverToClaude(id: string, text: string, sender: string) {
+  await mcp.notification({
+    method: 'notifications/claude/channel',
+    params: {
+      content: text,
+      meta: {
+        chat_id: `bridge-${ROOM_ID}`,
+        message_id: id,
+        sender,
+        room: ROOM_ID,
+        ts: new Date().toISOString(),
+      },
+    },
+  })
+}
+
+// Background polling loop — picks up messages from Codex via bridge-server
+async function pollLoop() {
+  while (true) {
+    try {
+      const res = await fetch(
+        `${BASE}/pending-for-claude?timeout=${POLL_TIMEOUT_MS}`,
+        { signal: AbortSignal.timeout(POLL_TIMEOUT_MS + 5000) },
+      )
+      if (!res.ok) {
+        await Bun.sleep(POLL_BACKOFF_MS)
+        continue
+      }
+      const { messages } = await res.json() as {
+        messages: { id: string; text: string; sender: string }[]
+      }
+      for (const msg of messages) {
+        await deliverToClaude(msg.id, msg.text, msg.sender)
+      }
+    } catch {
+      // Bridge unreachable or timeout — back off and retry
+      await Bun.sleep(POLL_BACKOFF_MS)
+    }
+  }
+}
+
+// Cleanup on exit
+process.on('exit', () => { void unregister() })
+process.on('SIGINT', () => { void unregister().finally(() => process.exit(0)) })
+process.on('SIGTERM', () => { void unregister().finally(() => process.exit(0)) })
+
+await register()
+process.stderr.write(`[claude-mcp] polling room ${ROOM_ID} at ${BRIDGE_URL}\n`)
+void pollLoop()
