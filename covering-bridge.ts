@@ -5,6 +5,7 @@
 
 import { createInterface } from 'readline'
 import { spawnSync } from 'child_process'
+import { readdirSync, readFileSync } from 'fs'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const BRIDGE_DIR = new URL('.', import.meta.url).pathname
@@ -114,6 +115,33 @@ async function closeRoom(roomId: string): Promise<boolean> {
 
 // ── Display ──
 
+type TerminalSessions = Map<string, { claude: number[]; codex: number[] }>
+
+/** Scan /tmp for PID files written by bridge-claude / bridge-codex.
+ *  Returns only entries whose process is still alive. */
+function getTerminalSessions(): TerminalSessions {
+  const result: TerminalSessions = new Map()
+  try {
+    for (const file of readdirSync('/tmp')) {
+      const isClaude = file.startsWith('claude-bridge-room-')
+      const isCodex  = file.startsWith('codex-bridge-room-')
+      if (!isClaude && !isCodex) continue
+      try {
+        const content = readFileSync(`/tmp/${file}`, 'utf8').trim()
+        const roomId  = content.split(':')[0]
+        const pid     = parseInt(file.replace(/^(claude|codex)-bridge-room-/, ''), 10)
+        if (!roomId || isNaN(pid)) continue
+        try { process.kill(pid, 0) } catch { continue }  // skip dead processes
+        if (!result.has(roomId)) result.set(roomId, { claude: [], codex: [] })
+        const s = result.get(roomId)!
+        if (isClaude) s.claude.push(pid)
+        else          s.codex.push(pid)
+      } catch {}
+    }
+  } catch {}
+  return result
+}
+
 function formatAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000)
   if (secs < 5)    return `${C.bgreen}just now${C.reset}`
@@ -156,6 +184,19 @@ function printRooms(rooms: Room[]): void {
       const id  = rpad(`${C.bold}${r.id}${C.reset}`, 14)
       const age = formatAge(r.lastActivity)
       console.log(`  ${id}  ${codex} ${codexL}   ${claude} ${claudeL}   ${age}`)
+    }
+  }
+  // ── Terminal sessions (dim) ──
+  const sessions = getTerminalSessions()
+  if (sessions.size > 0) {
+    const sorted = [...sessions.entries()].sort(([a], [b]) => a.localeCompare(b))
+    console.log(`  ${C.dim}terminals${C.reset}`)
+    for (const [roomId, s] of sorted) {
+      const parts: string[] = []
+      if (s.claude.length > 0) parts.push(`claude ×${s.claude.length}`)
+      if (s.codex.length  > 0) parts.push(`codex ×${s.codex.length}`)
+      const label = parts.length > 0 ? parts.join('   ') : 'no active terminals'
+      console.log(`  ${C.dim}${roomId.padEnd(14)}  ${label}${C.reset}`)
     }
   }
   console.log()
