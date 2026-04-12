@@ -148,7 +148,7 @@ function printRooms(rooms: Room[]): void {
   if (rooms.length === 0) {
     console.log(`  ${C.gray}No rooms yet. Press ${C.reset}${C.bold}o${C.reset}${C.gray} to open one.${C.reset}`)
   } else {
-    for (const r of rooms) {
+    for (const r of [...rooms].sort((a, b) => a.id.localeCompare(b.id))) {
       const codex  = agentDot(r.codexConnected,  C.bgreen)
       const claude = agentDot(r.claudeConnected, C.bpurple)
       const codexL  = r.codexConnected  ? `${C.green}codex${C.reset}`  : `${C.gray}codex${C.reset}`
