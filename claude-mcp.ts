@@ -68,11 +68,6 @@ const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const POLL_TIMEOUT_MS = 30000
 const POLL_BACKOFF_MS = 1000
 
-// DEBUG — remove after diagnosis
-const p1 = process.ppid ?? 0
-const p2 = getParentPid(p1)
-const p3 = getParentPid(p2)
-process.stderr.write(`[claude-mcp] pid=${process.pid} ppid=${p1}(${readPidFile(p1)||'?'}) gp=${p2}(${readPidFile(p2)||'?'}) ggp=${p3}(${readPidFile(p3)||'?'}) ROOM_ID="${ROOM_ID}"\n`)
 
 if (!ROOM_ID) {
   process.stderr.write('claude-mcp: CODEX_BRIDGE_ROOM env var is required\n')

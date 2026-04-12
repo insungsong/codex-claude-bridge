@@ -92,6 +92,19 @@ function isCodexConnected(room: RoomState) {
 
 const rooms = new Map<string, RoomState>()
 
+// Tombstone: roomIds deleted within the last 10s. Prevents zombie MCP processes from
+// instantly reviving a room after [c] closes it. Expires automatically after 10s,
+// allowing the user to manually reopen the same room ID again.
+const recentlyDeleted = new Map<string, number>()
+function markDeleted(roomId: string) {
+  recentlyDeleted.set(roomId, Date.now())
+  setTimeout(() => recentlyDeleted.delete(roomId), 10000)
+}
+function isTombstoned(roomId: string) {
+  const ts = recentlyDeleted.get(roomId)
+  return ts !== undefined && Date.now() - ts < 10000
+}
+
 function getOrCreateRoom(roomId: string): RoomState {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
@@ -261,6 +274,7 @@ Bun.serve({
         for (const w of pending.waiters) w.resolve(Response.json({ timeout: true, reply: null }))
       }
       rooms.delete(roomId)
+      markDeleted(roomId)  // tombstone: block auto-create for 10s
       process.stderr.write(`[bridge] room closed: ${roomId}\n`)
       return new Response(null, { status: 204 })
     }
@@ -282,11 +296,11 @@ Bun.serve({
     const roomId = decodeURIComponent(roomMatch[1])
     const sub = roomMatch[2]
 
-    // Claude connect/disconnect — only updates existing rooms (never recreates closed rooms)
+    // Claude connect — auto-creates room on first heartbeat (unless tombstoned)
     if (sub === 'claude/connect') {
       if (req.method === 'POST') {
-        const room = rooms.get(roomId)
-        if (!room) return new Response(null, { status: 404 })
+        if (isTombstoned(roomId)) return new Response(null, { status: 404 })
+        const room = getOrCreateRoom(roomId)
         room.claudeLastSeen = Date.now()
         touchRoom(room)
         process.stderr.write(`[bridge] claude connected: ${roomId}\n`)
@@ -300,11 +314,11 @@ Bun.serve({
       }
     }
 
-    // Codex heartbeat — only updates existing rooms (never recreates closed rooms)
+    // Codex heartbeat — auto-creates room on first heartbeat (unless tombstoned)
     if (sub === 'codex/heartbeat' || sub === 'codex/connect') {
       if (req.method === 'POST') {
-        const room = rooms.get(roomId)
-        if (!room) return new Response(null, { status: 404 })
+        if (isTombstoned(roomId)) return new Response(null, { status: 404 })
+        const room = getOrCreateRoom(roomId)
         room.codexLastSeen = Date.now()
         touchRoom(room)
         return new Response(null, { status: 204 })
