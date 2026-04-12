@@ -27,8 +27,8 @@ const C = {
   bcyan:   '\x1b[96m',
   green:   '\x1b[32m',
   bgreen:  '\x1b[92m',
-  purple:  '\x1b[35m',
-  bpurple: '\x1b[95m',
+  purple:  '\x1b[33m',   // orange (256-color fallback: yellow-ish)
+  bpurple: '\x1b[38;5;208m',  // bright orange
   yellow:  '\x1b[33m',
   gray:    '\x1b[90m',
   red:     '\x1b[31m',
