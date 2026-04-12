@@ -33,8 +33,9 @@ type Room = {
 
 async function isBridgeRunning(): Promise<boolean> {
   try {
-    const res = await fetch(`${BRIDGE_URL}/api/health`, { signal: AbortSignal.timeout(2000) })
-    return res.ok
+    // Check /api/rooms (multi-room endpoint) — distinguishes new bridge-server from legacy server.ts
+    const res = await fetch(`${BRIDGE_URL}/api/rooms`, { signal: AbortSignal.timeout(2000) })
+    return res.ok && Array.isArray(await res.json())
   } catch {
     return false
   }
@@ -68,7 +69,9 @@ async function ensureBridge(): Promise<void> {
 async function getRooms(): Promise<Room[]> {
   try {
     const res = await fetch(`${BRIDGE_URL}/api/rooms`, { signal: AbortSignal.timeout(3000) })
-    return await res.json() as Room[]
+    if (!res.ok) return []
+    const data = await res.json()
+    return Array.isArray(data) ? data as Room[] : []
   } catch {
     return []
   }
