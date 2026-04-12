@@ -1,18 +1,6 @@
 #!/usr/bin/env bun
 /**
  * covering-bridge — Room manager CLI for the Codex-Claude multi-room bridge.
- *
- * Usage:
- *   bun covering-bridge.ts
- *
- * Shows active rooms, lets you open new rooms (by ticket number) and close them.
- * Rooms stay open until explicitly closed — no auto-expiry.
- *
- * Terminal opening strategy (in priority order):
- *   1. tmux  — new window with vertical split (claude left, codex right)
- *   2. iTerm2 — new tab via AppleScript
- *   3. Terminal.app — new tab via AppleScript
- *   4. Fallback — print commands for manual execution
  */
 
 import { createInterface } from 'readline'
@@ -20,6 +8,7 @@ import { spawnSync } from 'child_process'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const BRIDGE_DIR = new URL('.', import.meta.url).pathname
+const VERSION = 'v0.4'
 
 type Room = {
   id: string
@@ -29,11 +18,49 @@ type Room = {
   lastActivity: number
 }
 
+// ── ANSI helpers ──
+
+const C = {
+  reset:   '\x1b[0m',
+  bold:    '\x1b[1m',
+  dim:     '\x1b[2m',
+  cyan:    '\x1b[36m',
+  bcyan:   '\x1b[96m',    // bright cyan  — header
+  green:   '\x1b[32m',    // codex live
+  bgreen:  '\x1b[92m',    // codex live bright
+  purple:  '\x1b[35m',    // claude live
+  bpurple: '\x1b[95m',    // claude live bright
+  yellow:  '\x1b[33m',
+  gray:    '\x1b[90m',
+  white:   '\x1b[97m',
+  red:     '\x1b[31m',
+}
+
+/** Strip ANSI codes to measure visible length. */
+function vis(s: string) { return s.replace(/\x1b\[[0-9;]*m/g, '') }
+
+/** Right-pad to visible width n. */
+function rpad(s: string, n: number) {
+  const diff = n - vis(s).length
+  return diff > 0 ? s + ' '.repeat(diff) : s
+}
+
+// ── Box drawing ──
+
+const BOX = 54  // inner width (between │)
+
+function boxTop()    { return `╭${'─'.repeat(BOX)}╮` }
+function boxBottom() { return `╰${'─'.repeat(BOX)}╯` }
+function boxRow(content: string) {
+  const padding = BOX - vis(content).length
+  return `│${content}${' '.repeat(Math.max(0, padding))}│`
+}
+function divider(char = '─') { return `  ${char.repeat(BOX - 2)}` }
+
 // ── Bridge server management ──
 
 async function isBridgeRunning(): Promise<boolean> {
   try {
-    // Check /api/rooms (multi-room endpoint) — distinguishes new bridge-server from legacy server.ts
     const res = await fetch(`${BRIDGE_URL}/api/rooms`, { signal: AbortSignal.timeout(2000) })
     return res.ok && Array.isArray(await res.json())
   } catch {
@@ -42,16 +69,9 @@ async function isBridgeRunning(): Promise<boolean> {
 }
 
 async function startBridgeServer(): Promise<void> {
-  console.log('  Starting bridge server...')
   const serverPath = `${BRIDGE_DIR}bridge-server.ts`
-  const proc = Bun.spawn(['bun', serverPath], {
-    stdout: 'ignore',
-    stderr: 'ignore',
-    stdin: 'ignore',
-  })
-  // Detach so it outlives this process
+  const proc = Bun.spawn(['bun', serverPath], { stdout: 'ignore', stderr: 'ignore', stdin: 'ignore' })
   proc.unref()
-  // Wait for it to become ready
   for (let i = 0; i < 10; i++) {
     await Bun.sleep(300)
     if (await isBridgeRunning()) return
@@ -93,33 +113,72 @@ async function closeRoom(roomId: string): Promise<boolean> {
 
 function formatAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000)
-  if (secs < 60) return `${secs}s ago`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  return `${Math.floor(secs / 3600)}h ago`
+  if (secs < 5)    return `${C.bgreen}just now${C.reset}`
+  if (secs < 60)   return `${C.gray}${secs}s ago${C.reset}`
+  if (secs < 3600) return `${C.gray}${Math.floor(secs / 60)}m ago${C.reset}`
+  return `${C.gray}${Math.floor(secs / 3600)}h ago${C.reset}`
 }
 
-function connStatus(claude: boolean, codex: boolean): string {
-  const c = claude ? '\x1b[32mclaude \u2713\x1b[0m' : '\x1b[90mclaude \u2717\x1b[0m'
-  const x = codex  ? '\x1b[32mcodex \u2713\x1b[0m'  : '\x1b[90mcodex \u2717\x1b[0m'
-  return `${c}  ${x}`
+function agentDot(connected: boolean, color: string): string {
+  return connected
+    ? `${color}●${C.reset}`
+    : `${C.gray}○${C.reset}`
 }
 
 function printRooms(rooms: Room[]): void {
   console.clear()
-  console.log('\x1b[1m\x1b[36m  Codex\u2013Claude Bridge\x1b[0m  \x1b[90mv0.3 multi-room\x1b[0m')
-  console.log(`  ${BRIDGE_URL}\n`)
 
+  // ── Header box ──
+  console.log(boxTop())
+  console.log(boxRow(''))
+  console.log(boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.gray}${VERSION}${C.reset}`))
+  console.log(boxRow(`     ${C.dim}multi-room bridge${C.reset}`))
+  console.log(boxRow(''))
+  console.log(boxBottom())
+  console.log()
+
+  // ── Status line ──
+  const roomCount = rooms.length === 0
+    ? `${C.gray}no active rooms${C.reset}`
+    : `${C.bold}${rooms.length}${C.reset} ${rooms.length === 1 ? 'room' : 'rooms'} active`
+  console.log(`  ${roomCount}  ${C.gray}·${C.reset}  ${C.dim}${BRIDGE_URL}${C.reset}`)
+  console.log()
+
+  // ── Room list ──
   if (rooms.length === 0) {
-    console.log('  \x1b[90m(no active rooms)\x1b[0m\n')
+    console.log(`  ${C.gray}No rooms yet. Press ${C.reset}${C.bold}o${C.reset}${C.gray} to open one.${C.reset}`)
+    console.log()
   } else {
     for (const r of rooms) {
+      const claude = agentDot(r.claudeConnected, C.bpurple)
+      const codex  = agentDot(r.codexConnected,  C.bgreen)
+
+      const claudeLabel = r.claudeConnected
+        ? `${C.purple}claude${C.reset}`
+        : `${C.gray}claude${C.reset}`
+      const codexLabel = r.codexConnected
+        ? `${C.green}codex${C.reset}`
+        : `${C.gray}codex${C.reset}`
+
+      const id  = rpad(`${C.bold}${r.id}${C.reset}`, 22)
       const age = formatAge(r.lastActivity)
-      console.log(`  \x1b[1m${r.id.padEnd(14)}\x1b[0m  ${connStatus(r.claudeConnected, r.codexConnected)}   \x1b[90m${age}\x1b[0m`)
+
+      console.log(`  ${id}  ${claude} ${claudeLabel}   ${codex} ${codexLabel}   ${age}`)
     }
     console.log()
   }
 
-  console.log('  \x1b[90m[o] open new room   [c] close room   [r] refresh   [q] quit\x1b[0m\n')
+  // ── Footer ──
+  console.log(divider())
+  const keys = [
+    `${C.bold}o${C.reset} open`,
+    `${C.bold}c${C.reset} close`,
+    `${C.bold}r${C.reset} refresh`,
+    `${C.bold}q${C.reset} quit`,
+  ]
+  console.log(`  ${keys.join(`  ${C.gray}·${C.reset}  `)}`)
+  console.log(divider())
+  console.log()
 }
 
 // ── Terminal opening ──
@@ -127,16 +186,14 @@ function printRooms(rooms: Room[]): void {
 function detectEnv(): 'tmux' | 'iterm2' | 'terminal' | 'none' {
   if (process.env.TMUX) return 'tmux'
   if (process.env.TERM_PROGRAM === 'iTerm.app') return 'iterm2'
-  // Check if Terminal.app is running via $TERM_PROGRAM
   if (process.env.TERM_PROGRAM === 'Apple_Terminal') return 'terminal'
   return 'none'
 }
 
 function openWithTmux(roomId: string, cmd1: string, cmd2: string): void {
-  // New window named after the room, split into left (claude) and right (codex)
   spawnSync('tmux', ['new-window', '-n', roomId, cmd1])
   spawnSync('tmux', ['split-window', '-h', cmd2])
-  spawnSync('tmux', ['select-pane', '-L']) // focus left (claude)
+  spawnSync('tmux', ['select-pane', '-L'])
 }
 
 function openWithAppleScript(app: 'iTerm' | 'Terminal', roomId: string, cmd1: string, cmd2: string): void {
@@ -169,33 +226,31 @@ end tell`
 
 function openRoom(roomId: string): 'auto' | 'manual' {
   const claudeCmd = `bridge-claude ${roomId}`
-  const codexCmd = `bridge-codex ${roomId}`
+  const codexCmd  = `bridge-codex ${roomId}`
   const env = detectEnv()
 
-  console.log(`\n  Opening room \x1b[1m${roomId}\x1b[0m...`)
+  console.log(`\n  ${C.dim}Opening${C.reset} ${C.bold}${roomId}${C.reset} ...`)
 
   if (env === 'tmux') {
     openWithTmux(roomId, claudeCmd, codexCmd)
-    console.log('  \x1b[32m\u2713\x1b[0m tmux window opened (claude left, codex right)\n')
+    console.log(`  ${C.bgreen}✓${C.reset} tmux window opened ${C.gray}(claude left · codex right)${C.reset}\n`)
     return 'auto'
   }
-
   if (env === 'iterm2') {
     openWithAppleScript('iTerm', roomId, claudeCmd, codexCmd)
-    console.log('  \x1b[32m\u2713\x1b[0m iTerm2 tabs opened\n')
+    console.log(`  ${C.bgreen}✓${C.reset} iTerm2 tabs opened\n`)
     return 'auto'
   }
-
   if (env === 'terminal') {
     openWithAppleScript('Terminal', roomId, claudeCmd, codexCmd)
-    console.log('  \x1b[32m\u2713\x1b[0m Terminal.app windows opened\n')
+    console.log(`  ${C.bgreen}✓${C.reset} Terminal.app windows opened\n`)
     return 'auto'
   }
 
-  // Fallback: print commands for manual execution
-  console.log('\n  Run these in two separate terminals:\n')
-  console.log(`  \x1b[33m[Claude]\x1b[0m  ${claudeCmd}`)
-  console.log(`  \x1b[32m[Codex] \x1b[0m  ${codexCmd}\n`)
+  // Fallback
+  console.log(`\n  ${C.gray}Run these in two separate terminals:${C.reset}\n`)
+  console.log(`  ${C.purple}[claude]${C.reset}  ${claudeCmd}`)
+  console.log(`  ${C.green}[codex] ${C.reset}  ${codexCmd}\n`)
   return 'manual'
 }
 
@@ -206,12 +261,12 @@ function prompt(rl: ReturnType<typeof createInterface>, question: string): Promi
 }
 
 async function main(): Promise<void> {
+  process.stdout.write(`\n  ${C.dim}Connecting to bridge...${C.reset} `)
   try {
-    process.stdout.write('  Connecting to bridge... ')
     await ensureBridge()
-    console.log('\x1b[32mready\x1b[0m\n')
+    console.log(`${C.bgreen}ready${C.reset}\n`)
   } catch (err) {
-    console.error(`\n  \x1b[31mError:\x1b[0m ${err instanceof Error ? err.message : err}`)
+    console.error(`\n  ${C.red}✗${C.reset} ${err instanceof Error ? err.message : err}`)
     process.exit(1)
   }
 
@@ -222,33 +277,29 @@ async function main(): Promise<void> {
     const rooms = await getRooms()
     printRooms(rooms)
 
-    const choice = (await prompt(rl, '  > ')).trim().toLowerCase()
+    const choice = (await prompt(rl, `  ${C.bcyan}›${C.reset} `)).trim().toLowerCase()
 
     if (choice === 'q' || choice === 'quit') {
       rl.close()
-      console.log('  bye.')
+      console.log(`\n  ${C.dim}bye.${C.reset}\n`)
       process.exit(0)
     }
 
-    if (choice === 'r' || choice === 'refresh') {
-      continue
-    }
+    if (choice === 'r' || choice === 'refresh') continue
 
     if (choice === 'o' || choice === 'open') {
-      const ticketRaw = (await prompt(rl, '  Ticket number (e.g. ENG-1234): ')).trim()
+      const ticketRaw = (await prompt(rl, `  ${C.gray}Room ID (e.g. ENG-1234):${C.reset} `)).trim()
       const ticket = ticketRaw.toUpperCase()
-      if (!ticket) { console.log('  Cancelled.'); continue }
+      if (!ticket) { console.log(`  ${C.gray}Cancelled.${C.reset}`); continue }
       if (rooms.find(r => r.id === ticket)) {
-        console.log(`  \x1b[33mRoom ${ticket} already exists.\x1b[0m`)
+        console.log(`  ${C.yellow}⚠${C.reset}  Room ${C.bold}${ticket}${C.reset} already exists.`)
         await Bun.sleep(1000)
         continue
       }
-      // Pre-register room in bridge-server so it appears in the list immediately
       await fetch(`${BRIDGE_URL}/api/rooms/${encodeURIComponent(ticket)}`, { method: 'POST' }).catch(() => {})
       const mode = openRoom(ticket)
       if (mode === 'manual') {
-        // Fallback: keep commands visible until user presses Enter
-        await prompt(rl, '  Press Enter when you have started both terminals... ')
+        await prompt(rl, `  ${C.gray}Press Enter once both terminals are running...${C.reset} `)
       } else {
         await Bun.sleep(800)
       }
@@ -256,25 +307,36 @@ async function main(): Promise<void> {
     }
 
     if (choice === 'c' || choice === 'close') {
-      if (rooms.length === 0) { console.log('  No rooms to close.'); await Bun.sleep(800); continue }
-      console.log('\n  Active rooms:')
-      rooms.forEach((r, i) => console.log(`    [${i + 1}] ${r.id}`))
-      const pick = (await prompt(rl, '  Close room number (or Enter to cancel): ')).trim()
-      if (!pick) { console.log('  Cancelled.'); continue }
+      if (rooms.length === 0) {
+        console.log(`  ${C.gray}No rooms to close.${C.reset}`)
+        await Bun.sleep(800)
+        continue
+      }
+      console.log()
+      rooms.forEach((r, i) => {
+        const claude = agentDot(r.claudeConnected, C.bpurple)
+        const codex  = agentDot(r.codexConnected,  C.bgreen)
+        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${r.id}   ${claude} ${codex}`)
+      })
+      console.log()
+      const pick = (await prompt(rl, `  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
+      if (!pick) { console.log(`  ${C.gray}Cancelled.${C.reset}`); continue }
       const idx = parseInt(pick, 10) - 1
       if (isNaN(idx) || idx < 0 || idx >= rooms.length) {
-        console.log('  Invalid selection.')
+        console.log(`  ${C.red}✗${C.reset}  Invalid selection.`)
         await Bun.sleep(800)
         continue
       }
       const target = rooms[idx].id
       const ok = await closeRoom(target)
-      console.log(ok ? `  \x1b[32m\u2713\x1b[0m Room ${target} closed.` : `  \x1b[31mFailed to close ${target}.\x1b[0m`)
+      console.log(ok
+        ? `  ${C.bgreen}✓${C.reset}  ${C.bold}${target}${C.reset} closed.`
+        : `  ${C.red}✗${C.reset}  Failed to close ${target}.`)
       await Bun.sleep(800)
       continue
     }
 
-    // Unknown input — refresh
+    // Unknown — refresh silently
   }
 }
 
