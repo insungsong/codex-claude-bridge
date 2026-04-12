@@ -1,0 +1,17 @@
+#!/bin/sh
+# bridge-claude <ROOM_ID>
+# Claude Code를 Codex Bridge 룸에 연결해서 실행한다.
+#
+# Usage:
+#   bridge-claude ENG-1234
+
+ROOM="${1}"
+
+if [ -z "$ROOM" ]; then
+  echo "usage: bridge-claude <ROOM_ID>" >&2
+  echo "  e.g. bridge-claude ENG-1234" >&2
+  exit 1
+fi
+
+printf "%s" "$ROOM" > "/tmp/claude-bridge-room-$$"
+exec claude --dangerously-load-development-channels server:codex-bridge

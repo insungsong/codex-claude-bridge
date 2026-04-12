@@ -168,10 +168,8 @@ end tell`
 }
 
 function openRoom(roomId: string): 'auto' | 'manual' {
-  // Both Claude Code and Codex strip env vars when spawning MCP servers.
-  // Workaround: write room ID to a PID file; MCP reads it via process.ppid.
-  const claudeCmd = `sh -c 'printf "%s" "${roomId}" > /tmp/claude-bridge-room-$$; exec claude --dangerously-load-development-channels server:codex-bridge'`
-  const codexCmd = `sh -c 'printf "%s" "${roomId}" > /tmp/codex-bridge-room-$$; exec codex --full-auto'`
+  const claudeCmd = `bridge-claude ${roomId}`
+  const codexCmd = `bridge-codex ${roomId}`
   const env = detectEnv()
 
   console.log(`\n  Opening room \x1b[1m${roomId}\x1b[0m...`)

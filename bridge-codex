@@ -1,0 +1,17 @@
+#!/bin/sh
+# bridge-codex <ROOM_ID>
+# Codex CLI를 Codex Bridge 룸에 연결해서 실행한다.
+#
+# Usage:
+#   bridge-codex ENG-1234
+
+ROOM="${1}"
+
+if [ -z "$ROOM" ]; then
+  echo "usage: bridge-codex <ROOM_ID>" >&2
+  echo "  e.g. bridge-codex ENG-1234" >&2
+  exit 1
+fi
+
+printf "%s" "$ROOM" > "/tmp/codex-bridge-room-$$"
+exec codex --full-auto
