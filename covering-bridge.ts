@@ -35,8 +35,25 @@ const C = {
 }
 
 function vis(s: string) { return s.replace(/\x1b\[[0-9;]*m/g, '') }
+
+/** Visual column width, accounting for CJK double-width characters. */
+function visWidth(s: string): number {
+  let w = 0
+  for (const ch of vis(s)) {
+    const cp = ch.codePointAt(0) ?? 0
+    w += (
+      (cp >= 0x1100 && cp <= 0x115F) ||  // Hangul Jamo
+      (cp >= 0xAC00 && cp <= 0xD7AF) ||  // Hangul Syllables
+      (cp >= 0x4E00 && cp <= 0x9FFF) ||  // CJK Unified
+      (cp >= 0x3000 && cp <= 0x303F) ||  // CJK Symbols
+      (cp >= 0xFF00 && cp <= 0xFF60)      // Fullwidth Forms
+    ) ? 2 : 1
+  }
+  return w
+}
+
 function rpad(s: string, n: number) {
-  const diff = n - vis(s).length
+  const diff = n - visWidth(s)
   return diff > 0 ? s + ' '.repeat(diff) : s
 }
 
@@ -44,7 +61,7 @@ const BOX = 54
 function boxTop()    { return `  ${C.gray}╭${'─'.repeat(BOX)}╮${C.reset}` }
 function boxBottom() { return `  ${C.gray}╰${'─'.repeat(BOX)}╯${C.reset}` }
 function boxRow(content: string) {
-  const pad = BOX - vis(content).length
+  const pad = BOX - visWidth(content)
   return `  ${C.gray}│${C.reset}${content}${' '.repeat(Math.max(0, pad))}${C.gray}│${C.reset}`
 }
 function divider() { return `  ${C.gray}${'─'.repeat(BOX)}${C.reset}` }
