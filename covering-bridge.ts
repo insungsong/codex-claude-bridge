@@ -191,8 +191,8 @@ function renderScreen(rooms: Room[], frame: number): void {
   const leftWidth = BOX + 4
   const headerLines = [
     boxTop(),
-    boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.gray}${VERSION}${C.reset}`),
-    boxRow(`     ${C.dim}multi-room bridge${C.reset}`),
+    boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.dim}룸 관리 대시보드${C.reset}  ${C.gray}${VERSION}${C.reset}`),
+    boxRow(`     ${C.dim}multi-room agent bridge${C.reset}`),
     boxBottom(),
   ]
   console.log()
@@ -306,15 +306,19 @@ async function main(): Promise<void> {
   let frame = 0
   let animating = true
 
-  // ── Animation loop ──
-  async function tick() {
+  // ── Room data fetch — every 1s (age display + connection status) ──
+  const pollRooms = setInterval(async () => {
+    if (animating) rooms = await getRooms()
+  }, 1000)
+
+  // ── Animation loop — per-frame timing for rabbit ──
+  function tick() {
     if (!animating) return
-    rooms = await getRooms()
     renderScreen(rooms, frame)
     frame = (frame + 1) % RABBIT_FRAMES.length
     setTimeout(tick, FRAME_DURATIONS[frame])
   }
-  void tick()
+  tick()
 
   // ── Raw mode key handling ──
   process.stdin.setRawMode(true)
@@ -342,6 +346,7 @@ async function main(): Promise<void> {
     // Ctrl+C or q → quit
     if (k === '\u0003' || k === 'q') {
       animating = false
+      clearInterval(pollRooms)
       process.stdin.setRawMode(false)
       console.clear()
       console.log(`\n  ${C.dim}bye. 🐇${C.reset}\n`)
