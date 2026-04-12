@@ -3,7 +3,6 @@
  * covering-bridge — Room manager CLI for the Codex-Claude multi-room bridge.
  */
 
-import { createInterface } from 'readline'
 import { spawnSync } from 'child_process'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
@@ -286,8 +285,28 @@ function openRoom(roomId: string): 'auto' | 'manual' {
 
 // ── Interactive prompt (temporarily suspends animation) ──
 
-function prompt(rl: ReturnType<typeof createInterface>, question: string): Promise<string> {
-  return new Promise(resolve => rl.question(question, resolve))
+/** Read a line in raw mode without touching the stdin stream. */
+function readLine(question: string): Promise<string> {
+  return new Promise(resolve => {
+    process.stdout.write(`\n  ${question}`)
+    let buf = ''
+    function onKey(key: string) {
+      if (key === '\r' || key === '\n') {
+        process.stdin.removeListener('data', onKey)
+        process.stdout.write('\n')
+        resolve(buf)
+      } else if (key === '\u007f' || key === '\b') {
+        if (buf.length > 0) { buf = buf.slice(0, -1); process.stdout.write('\b \b') }
+      } else if (key === '\u0003') {  // Ctrl+C inside prompt → cancel
+        process.stdin.removeListener('data', onKey)
+        process.stdout.write('\n')
+        resolve('')
+      } else if (key >= ' ') {
+        buf += key; process.stdout.write(key)
+      }
+    }
+    process.stdin.on('data', onKey)
+  })
 }
 
 // ── Main ──
@@ -325,17 +344,12 @@ async function main(): Promise<void> {
   process.stdin.resume()
   process.stdin.setEncoding('utf8')
 
-  /** Pause animation and drop to readline for multi-char input. */
+  /** Pause animation and read a line in raw mode (no stream teardown). */
   async function suspendAndPrompt(question: string): Promise<string> {
     animating = false
-    process.stdin.setRawMode(false)
-    const rl = createInterface({ input: process.stdin, output: process.stdout })
-    process.stdout.write('\n')
-    const answer = await prompt(rl, `  ${question}`)
-    rl.close()
-    process.stdin.setRawMode(true)
+    const answer = await readLine(question)
     animating = true
-    void tick()
+    tick()
     return answer
   }
 
@@ -383,7 +397,6 @@ async function main(): Promise<void> {
     if (k === 'c') {
       if (rooms.length === 0) return
       animating = false
-      process.stdin.setRawMode(false)
       console.clear()
       console.log()
       rooms.forEach((r, i) => {
@@ -391,9 +404,7 @@ async function main(): Promise<void> {
         const claude = r.claudeConnected ? `${C.bpurple}◉${C.reset}` : `${C.gray}◯${C.reset}`
         console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${claude} claude`)
       })
-      const rl = createInterface({ input: process.stdin, output: process.stdout })
-      const pick = (await prompt(rl, `\n  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
-      rl.close()
+      const pick = (await readLine(`${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
       if (pick) {
         const idx = parseInt(pick, 10) - 1
         if (!isNaN(idx) && idx >= 0 && idx < rooms.length) {
@@ -405,9 +416,8 @@ async function main(): Promise<void> {
           await Bun.sleep(700)
         }
       }
-      process.stdin.setRawMode(true)
       animating = true
-      void tick()
+      tick()
     }
   })
 }
