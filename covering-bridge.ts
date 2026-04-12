@@ -163,7 +163,7 @@ function printRooms(rooms: Room[]): void {
       const id  = rpad(`${C.bold}${r.id}${C.reset}`, 22)
       const age = formatAge(r.lastActivity)
 
-      console.log(`  ${id}  ${claude} ${claudeLabel}   ${codex} ${codexLabel}   ${age}`)
+      console.log(`  ${id}  ${codex} ${codexLabel}   ${claude} ${claudeLabel}   ${age}`)
     }
     console.log()
   }
@@ -316,7 +316,7 @@ async function main(): Promise<void> {
       rooms.forEach((r, i) => {
         const claude = agentDot(r.claudeConnected, C.bpurple)
         const codex  = agentDot(r.codexConnected,  C.bgreen)
-        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${r.id}   ${claude} ${codex}`)
+        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${r.id}   ${codex} ${claude}`)
       })
       console.log()
       const pick = (await prompt(rl, `  ${C.gray}Close room # (Enter to cancel):${C.reset} `)).trim()
