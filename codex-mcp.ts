@@ -249,7 +249,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
-const HEARTBEAT_INTERVAL_MS = 3000
+const HEARTBEAT_INTERVAL_MS = 1000
 
 async function heartbeat() {
   try {

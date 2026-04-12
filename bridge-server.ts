@@ -56,7 +56,7 @@ type ClaudeWaiter = {
 }
 
 // If no heartbeat/poll within this window, consider the agent disconnected.
-const HEARTBEAT_TIMEOUT_MS = 8000  // 2.5× the 3s heartbeat interval
+const HEARTBEAT_TIMEOUT_MS = 3000  // 3× the 1s heartbeat interval
 
 type RoomState = {
   id: string

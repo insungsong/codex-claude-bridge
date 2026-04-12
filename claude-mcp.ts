@@ -179,7 +179,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 await mcp.connect(new StdioServerTransport())
 
-const CLAUDE_HEARTBEAT_INTERVAL_MS = 3000
+const CLAUDE_HEARTBEAT_INTERVAL_MS = 1000
 
 async function heartbeat() {
   try {
