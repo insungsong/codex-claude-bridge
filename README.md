@@ -1,48 +1,54 @@
 # Codex Bridge
 
-### Make Claude Code and OpenAI Codex talk to each other.
+### Make Claude Code and OpenAI Codex talk to each other — across multiple rooms.
 
-Uses [Claude Code Channels](https://code.claude.com/docs/en/channels) for push notifications on Claude's side and a blocking MCP tool on Codex's side.
-
-Two AI coding agents. One conversation. Real-time web UI to watch it happen.
+Run multiple Codex ↔ Claude pairs simultaneously, each isolated by ticket number.  
+One `covering-bridge` command manages all rooms from a single terminal.
 
 ![Codex Bridge UI showing a live multi-turn exchange between Codex and Claude](screenshot.png)
 
-## The problem
+---
 
-Claude Code and Codex CLI are both great coding agents, but they don't expose a native symmetric chat protocol between each other. Plain MCP is request-response, not push-to-both-live-sessions. A2A (Google's agent protocol) isn't supported natively by either tool. There's no off-the-shelf way to make the two agents hold a live conversation.
+## Overview
 
-## The solution
+```
+Room ENG-1234:  Codex-A  ↔  Claude-A   (feature A)
+Room ENG-5678:  Codex-B  ↔  Claude-B   (feature B)
+Room ENG-9999:  Codex-C  ↔  Claude-C   (feature C)
+```
 
-Claude Code recently shipped [Channels](https://code.claude.com/docs/en/channels), a way to push messages into a running session from an MCP server. This project uses that as the push mechanism on Claude's side, and a blocking MCP tool call on Codex's side, to create a practical bidirectional bridge between the two.
+Each room is completely isolated — messages never cross between rooms.  
+A single central `bridge-server` handles routing. The `covering-bridge` CLI opens new rooms on demand.
 
 <p align="center">
   <img src="architecture.svg" alt="Codex Bridge architecture diagram" width="800"/>
 </p>
 
-When Codex calls `send_to_claude()`, the bridge holds the connection open until Claude replies. From Codex's perspective it's a tool call that takes a bit to return. From Claude's perspective it's a channel notification. The bridge sits in between, routing messages and showing them in a web UI.
-
-In practice, Codex-initiated turns feel real-time and two-way. This is not symmetric push in both directions though: Claude can reply immediately to a pending Codex request, but Claude-initiated messages still wait until Codex polls or makes another request.
+---
 
 ## What you need
 
-- [Bun](https://bun.sh) (check with `bun --version`, install from bun.sh if missing)
-- [Claude Code](https://code.claude.com) v2.1.80+ with a claude.ai account
-- [Codex CLI](https://github.com/openai/codex) with an OpenAI API key or ChatGPT login
+- [Bun](https://bun.sh) — `bun --version` to check, install from bun.sh
+- [Claude Code](https://code.claude.com) v2.1.80+
+- [Codex CLI](https://github.com/openai/codex) with an OpenAI API key
 
-## Setup
+---
 
-### 1. Clone and install
+## Installation
 
 ```bash
-git clone https://github.com/abhishekgahlot2/codex-claude-bridge.git
+git clone <your-fork-url>
 cd codex-claude-bridge
 bun install
 ```
 
-### 2. Register the bridge with Claude Code
+---
 
-Add `codex-bridge` to your Claude Code MCP config. Open `~/.mcp.json` (create it if it doesn't exist) and add:
+## Setup
+
+### 1. Register Claude-side MCP
+
+Add to `~/.mcp.json` (create if missing):
 
 ```json
 {
@@ -50,17 +56,17 @@ Add `codex-bridge` to your Claude Code MCP config. Open `~/.mcp.json` (create it
     "codex-bridge": {
       "type": "stdio",
       "command": "bun",
-      "args": ["/full/path/to/codex-claude-bridge/server.ts"]
+      "args": ["/full/path/to/codex-claude-bridge/claude-mcp.ts"]
     }
   }
 }
 ```
 
-Replace `/full/path/to` with wherever you cloned the repo.
+> The room is selected at runtime via `CODEX_BRIDGE_ROOM` env var — no need for a separate config per room.
 
-### 3. Register the bridge with Codex CLI
+### 2. Register Codex-side MCP
 
-Add the Codex-side MCP server to `~/.codex/config.toml`:
+Add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.codex-bridge]
@@ -69,86 +75,151 @@ args = ["/full/path/to/codex-claude-bridge/codex-mcp.ts"]
 tool_timeout_sec = 120
 ```
 
-The `tool_timeout_sec = 120` is needed because `send_to_claude` can wait for Claude's reply for about 2 minutes. The default 60s timeout will kill the connection too early.
+`tool_timeout_sec = 120` is required — `send_to_claude` can wait up to 2 minutes for Claude's reply.
 
-### 4. Start Claude Code with the channel
+---
 
-```bash
-claude --dangerously-load-development-channels server:codex-bridge
-```
+## Running rooms
 
-You should see `Listening for channel messages from: server:codex-bridge` in the output.
-
-### 5. Start Codex CLI
-
-In a separate terminal:
+### Option A — covering-bridge CLI (recommended)
 
 ```bash
-codex
+bun covering-bridge.ts
 ```
 
-Codex will auto-load the `codex-bridge` MCP server from your config. Verify by running `/mcp` inside Codex — you should see `codex-bridge` listed with `send_to_claude` and `check_claude_messages` tools.
-
-### 6. Open the web UI
-
-Go to [http://localhost:8788](http://localhost:8788) in your browser. This is where you watch the conversation happen.
-
-## Usage
-
-Start the conversation from Codex's side. Tell Codex something like:
+This opens an interactive terminal UI:
 
 ```
-Use Claude bridge to discuss whether we should use Redis or Memcached for caching. Keep going until you agree.
+  Codex–Claude Bridge  v0.3 multi-room
+  http://localhost:8788
+
+  ENG-1234   claude ✓  codex ✓   12m ago
+  ENG-5678   claude ✓  codex ✗    3m ago
+
+  [o] open new room   [c] close room   [r] refresh   [q] quit
+
+  > o
+  Ticket number (e.g. ENG-1234): ENG-9999
+
+  Opening room ENG-9999...
+  ✓ tmux window opened (claude left, codex right)
 ```
 
-Codex calls `send_to_claude()`, the bridge pushes it to Claude via a channel notification, Claude processes it and replies, and the bridge returns Claude's reply to Codex. Codex can keep calling `send_to_claude()` to continue the discussion.
+The bridge server starts automatically if not already running.  
+Rooms stay open until you explicitly close them with `[c]`.
 
-This means the smooth path is Codex -> Claude -> Codex. It behaves like a live back-and-forth conversation, even though the overall bridge is still asymmetric under the hood.
+**Terminal support:**
+- **tmux** — new window, split-pane (claude left, codex right)
+- **iTerm2** — two new tabs
+- **Terminal.app** — two new windows
+- **Fallback** — prints commands to run manually
 
-You can also type in the web UI as a human observer — your messages go straight to Claude's session.
+### Option B — manual per-room launch
 
-### Web UI
+Start the central server once:
 
-The web UI at localhost:8788 shows all messages in real time:
-- Purple bubbles on the left = Claude
-- Green bubbles on the right = Codex
-- Gray bubbles = you (human observer)
+```bash
+bun bridge-server.ts
+```
 
-### Starting from Claude's side
+Then for each room, open two terminals:
 
-Claude has a `send_to_codex` tool, but since Codex can't receive push notifications, the message sits in a queue until Codex polls for it. That's why the Codex-initiated flow is the smoother and more real-time path.
+```bash
+# Terminal 1 — Claude
+CODEX_BRIDGE_ROOM=ENG-1234 claude --dangerously-load-development-channels server:codex-bridge
+
+# Terminal 2 — Codex
+CODEX_BRIDGE_ROOM=ENG-1234 codex --full-auto
+```
+
+Repeat with a different `CODEX_BRIDGE_ROOM` value for each additional room.
+
+---
+
+## Web UI
+
+Open [http://localhost:8788](http://localhost:8788) to watch all rooms in real time.
+
+- Use the **room selector** dropdown to switch between active rooms
+- **Purple bubbles** (left) = Claude
+- **Green bubbles** (right) = Codex
+- **Gray bubbles** = you (human observer via the text box)
+
+---
+
+## Starting a conversation
+
+From inside a Codex session, tell it:
+
+```
+Use the send_to_claude tool to discuss whether we should use Redis or Memcached for caching.
+Keep going until you reach a decision.
+```
+
+Codex calls `send_to_claude()` → bridge pushes to Claude → Claude replies → bridge returns to Codex.  
+Codex keeps calling `send_to_claude()` until consensus is reached.
+
+---
 
 ## Files
 
-| File | What it does |
-|------|------|
-| `server.ts` | Claude Code channel plugin. MCP server over stdio, web UI, and HTTP API endpoints for the Codex side. |
-| `codex-mcp.ts` | Codex CLI MCP server. Exposes `send_to_claude()` and `check_claude_messages()`. Talks to `server.ts` over HTTP. |
-| `.mcp.json` | Plugin config for Claude Code's plugin system. |
-| `.claude-plugin/plugin.json` | Plugin metadata. |
+```
+bridge-server.ts    Central HTTP server. Manages all rooms. Run once.
+claude-mcp.ts       Claude-side MCP relay. One instance per room (CODEX_BRIDGE_ROOM).
+codex-mcp.ts        Codex-side MCP server. One instance per room (CODEX_BRIDGE_ROOM).
+covering-bridge.ts  Interactive CLI. Manages rooms, opens terminals automatically.
+```
 
-## Configuration
+Legacy `server.ts` is kept for reference — it combined the HTTP server and Claude MCP in one process (single-room only).
 
-| Env var | Default | What it does |
-|---------|---------|------|
-| `CODEX_BRIDGE_PORT` | `8788` | Port for the web UI and internal API |
-| `CODEX_BRIDGE_URL` | `http://localhost:8788` | URL the Codex-side MCP server uses to reach the bridge |
+---
 
-## Why not MCP or A2A?
+## Environment variables
 
-**MCP** works as part of the transport here, but by itself it's request-response. One agent can call the other as a tool, but neither side gets a native symmetric push channel into the other's live session.
+| Variable | Default | Description |
+|---|---|---|
+| `CODEX_BRIDGE_ROOM` | *(required)* | Room ID — use your ticket number e.g. `ENG-1234` |
+| `CODEX_BRIDGE_URL` | `http://localhost:8788` | Bridge server URL |
+| `CODEX_BRIDGE_PORT` | `8788` | Bridge server port |
 
-**A2A** (Google's Agent-to-Agent protocol) would be a cleaner fit in theory, but neither Claude Code nor Codex exposes native A2A or ACP integration today. Community bridges usually end up wrapping those protocols in MCP anyway.
+---
 
-**Claude Code Channels** are the only push mechanism either tool exposes today for this setup. This bridge uses channels on Claude's side and a blocking tool call on Codex's side, so Codex-initiated conversations feel live and bidirectional even though Claude -> Codex still falls back to queue + poll.
+## npm scripts
+
+```bash
+bun run bridge       # covering-bridge CLI (room manager)
+bun run server       # bridge-server (central HTTP server)
+bun run claude-mcp   # claude-mcp.ts (set CODEX_BRIDGE_ROOM first)
+bun run codex-mcp    # codex-mcp.ts (set CODEX_BRIDGE_ROOM first)
+```
+
+---
+
+## How it works
+
+```
+Codex  →  codex-mcp.ts  →  POST /api/rooms/ENG-1234/from-codex
+                         →  bridge-server stores in pendingForClaude
+                         →  claude-mcp.ts long-polls pending-for-claude
+                         →  mcp.notification() → Claude sees message
+                         →  Claude calls reply tool
+                         →  claude-mcp.ts  →  POST /api/rooms/ENG-1234/from-claude
+                         →  bridge-server resolves Codex's waiting poll
+Codex  ←  send_to_claude() returns Claude's reply
+```
+
+Each room has its own isolated state: pending replies, in-flight deduplication, and message queues never touch other rooms.
+
+---
 
 ## Known limitations
 
-- Not symmetric full duplex: Codex-initiated turns are real-time, but Claude-initiated messages wait for Codex to poll or make another request.
-- Codex can't receive push notifications — conversation flows best when Codex initiates.
-- Both agents need to be on the same machine (localhost bridge).
-- Channels are a Claude Code research preview feature — `--dangerously-load-development-channels` flag is required.
-- Claude must include `reply_to` when replying to Codex. If it omits it, the reply still appears in the web UI but won't route back to Codex.
+- Claude → Codex is still queue-based: Claude-initiated messages wait until Codex polls. Codex-initiated turns are the real-time path.
+- Both agents must be on the same machine (localhost bridge).
+- `--dangerously-load-development-channels` flag is required for Claude Code (Channels are a research preview).
+- Claude must include `reply_to` when replying — if omitted, the reply appears in the web UI but won't route back to Codex.
+
+---
 
 ## License
 
