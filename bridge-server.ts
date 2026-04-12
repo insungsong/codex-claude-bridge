@@ -229,8 +229,14 @@ Bun.serve({
       return Response.json(list)
     }
 
+    // ── POST /api/rooms/:roomId — pre-create room (called by covering-bridge) ──
     // ── DELETE /api/rooms/:roomId — close room ──
     const closeMatch = path.match(/^\/api\/rooms\/([^/]+)$/)
+    if (closeMatch && req.method === 'POST') {
+      const roomId = decodeURIComponent(closeMatch[1])
+      getOrCreateRoom(roomId)
+      return new Response(null, { status: 201 })
+    }
     if (closeMatch && req.method === 'DELETE') {
       const roomId = decodeURIComponent(closeMatch[1])
       const room = rooms.get(roomId)

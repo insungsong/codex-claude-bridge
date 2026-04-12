@@ -167,7 +167,7 @@ end tell`
   spawnSync('osascript', ['-e', script])
 }
 
-function openRoom(roomId: string): void {
+function openRoom(roomId: string): 'auto' | 'manual' {
   const claudeCmd = `CODEX_BRIDGE_ROOM=${roomId} claude --dangerously-load-development-channels`
   const codexCmd = `CODEX_BRIDGE_ROOM=${roomId} codex --full-auto`
   const env = detectEnv()
@@ -177,25 +177,26 @@ function openRoom(roomId: string): void {
   if (env === 'tmux') {
     openWithTmux(roomId, claudeCmd, codexCmd)
     console.log('  \x1b[32m\u2713\x1b[0m tmux window opened (claude left, codex right)\n')
-    return
+    return 'auto'
   }
 
   if (env === 'iterm2') {
     openWithAppleScript('iTerm', roomId, claudeCmd, codexCmd)
     console.log('  \x1b[32m\u2713\x1b[0m iTerm2 tabs opened\n')
-    return
+    return 'auto'
   }
 
   if (env === 'terminal') {
     openWithAppleScript('Terminal', roomId, claudeCmd, codexCmd)
     console.log('  \x1b[32m\u2713\x1b[0m Terminal.app windows opened\n')
-    return
+    return 'auto'
   }
 
-  // Fallback: print commands
+  // Fallback: print commands for manual execution
   console.log('\n  Run these in two separate terminals:\n')
   console.log(`  \x1b[33m[Claude]\x1b[0m  ${claudeCmd}`)
   console.log(`  \x1b[32m[Codex] \x1b[0m  ${codexCmd}\n`)
+  return 'manual'
 }
 
 // ── Interactive prompt ──
@@ -242,8 +243,15 @@ async function main(): Promise<void> {
         await Bun.sleep(1000)
         continue
       }
-      openRoom(ticket)
-      await Bun.sleep(1500)
+      // Pre-register room in bridge-server so it appears in the list immediately
+      await fetch(`${BRIDGE_URL}/api/rooms/${encodeURIComponent(ticket)}`, { method: 'POST' }).catch(() => {})
+      const mode = openRoom(ticket)
+      if (mode === 'manual') {
+        // Fallback: keep commands visible until user presses Enter
+        await prompt(rl, '  Press Enter when you have started both terminals... ')
+      } else {
+        await Bun.sleep(800)
+      }
       continue
     }
 
