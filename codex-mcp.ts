@@ -251,7 +251,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 const HEARTBEAT_INTERVAL_MS = 1000
 
+// Codex MCP runs in its own process group (PGID = self), so it never receives
+// SIGHUP when the Codex parent exits. Poll the parent PID directly instead.
+function isParentAlive(): boolean {
+  try { process.kill(process.ppid!, 0); return true } catch { return false }
+}
+
 async function heartbeat() {
+  if (!isParentAlive()) {
+    process.stderr.write(`[codex-mcp] parent gone — exiting\n`)
+    await unregister()
+    process.exit(0)
+  }
   try {
     const res = await fetch(`${BASE}/codex/heartbeat`, { method: 'POST', signal: AbortSignal.timeout(5000) })
     if (res.status === 404) {
