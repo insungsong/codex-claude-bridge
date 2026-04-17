@@ -5,7 +5,8 @@
 
 import { createInterface } from 'readline'
 import { spawnSync } from 'child_process'
-import { readdirSync, readFileSync } from 'fs'
+
+import { getTerminalSessions, shutdownRoomTerminals } from './room-terminals'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const BRIDGE_DIR = new URL('.', import.meta.url).pathname
@@ -115,33 +116,6 @@ async function closeRoom(roomId: string): Promise<boolean> {
 
 // ── Display ──
 
-type TerminalSessions = Map<string, { claude: number[]; codex: number[] }>
-
-/** Scan /tmp for PID files written by bridge-claude / bridge-codex.
- *  Returns only entries whose process is still alive. */
-function getTerminalSessions(): TerminalSessions {
-  const result: TerminalSessions = new Map()
-  try {
-    for (const file of readdirSync('/tmp')) {
-      const isClaude = file.startsWith('claude-bridge-room-')
-      const isCodex  = file.startsWith('codex-bridge-room-')
-      if (!isClaude && !isCodex) continue
-      try {
-        const content = readFileSync(`/tmp/${file}`, 'utf8').trim()
-        const roomId  = content.split(':')[0]
-        const pid     = parseInt(file.replace(/^(claude|codex)-bridge-room-/, ''), 10)
-        if (!roomId || isNaN(pid)) continue
-        try { process.kill(pid, 0) } catch { continue }  // skip dead processes
-        if (!result.has(roomId)) result.set(roomId, { claude: [], codex: [] })
-        const s = result.get(roomId)!
-        if (isClaude) s.claude.push(pid)
-        else          s.codex.push(pid)
-      } catch {}
-    }
-  } catch {}
-  return result
-}
-
 function formatAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000)
   if (secs < 5)    return `${C.bgreen}just now${C.reset}`
@@ -152,6 +126,39 @@ function formatAge(ts: number): string {
 
 function agentDot(connected: boolean, onColor: string): string {
   return connected ? `${onColor}●${C.reset}` : `${C.gray}○${C.reset}`
+}
+
+function parseSelection(pick: string, count: number): number[] {
+  return [...new Set(
+    pick.split(',')
+      .map(s => parseInt(s.trim(), 10) - 1)
+      .filter(i => !isNaN(i) && i >= 0 && i < count),
+  )]
+}
+
+function getTerminalTargets() {
+  return [...getTerminalSessions().entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([roomId, sessions]) => ({
+      roomId,
+      claudeCount: sessions.claude.length,
+      codexCount: sessions.codex.length,
+    }))
+}
+
+function summarizeShutdown(roomId: string, summary: Awaited<ReturnType<typeof shutdownRoomTerminals>>): string {
+  if (summary.matched === 0) {
+    return `  ${C.gray}•${C.reset}  ${roomId}: no bridge-launched terminals found.`
+  }
+
+  const parts: string[] = []
+  if (summary.terminated.length > 0) parts.push(`SIGTERM ${summary.terminated.length}`)
+  if (summary.forced.length > 0) parts.push(`SIGKILL ${summary.forced.length}`)
+  if (summary.failures.length > 0) parts.push(`failed ${summary.failures.length}`)
+
+  const detail = parts.length > 0 ? parts.join(', ') : 'no-op'
+  const tone = summary.failures.length > 0 ? `${C.yellow}•${C.reset}` : `${C.bgreen}•${C.reset}`
+  return `  ${tone}  ${roomId}: terminal shutdown ${detail}.`
 }
 
 function printRooms(rooms: Room[]): void {
@@ -206,6 +213,7 @@ function printRooms(rooms: Room[]): void {
   const keys = [
     `${C.bold}o${C.reset} open`,
     `${C.bold}c${C.reset} close`,
+    `${C.bold}t${C.reset} terminals`,
     `${C.bold}r${C.reset} refresh`,
     `${C.bold}q${C.reset} quit`,
   ]
@@ -317,6 +325,39 @@ async function main(): Promise<void> {
       continue
     }
 
+    if (choice === 't' || choice === 'terminal' || choice === 'terminals') {
+      const terminalTargets = getTerminalTargets()
+      if (terminalTargets.length === 0) {
+        console.log(`  ${C.gray}No terminals to stop.${C.reset}`)
+        await Bun.sleep(700)
+        continue
+      }
+
+      console.log()
+      terminalTargets.forEach((target, i) => {
+        const parts: string[] = []
+        if (target.claudeCount > 0) parts.push(`${C.purple}claude${C.reset} ×${target.claudeCount}`)
+        if (target.codexCount > 0) parts.push(`${C.green}codex${C.reset} ×${target.codexCount}`)
+        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${target.roomId}${C.reset}   ${parts.join('   ')}`)
+      })
+
+      const pick = (await prompt(
+        rl,
+        `\n  ${C.gray}Stop terminal # — single or comma-separated (e.g. 1,2,3):${C.reset} `,
+      )).trim()
+
+      if (pick) {
+        const indices = parseSelection(pick, terminalTargets.length)
+        for (const idx of indices) {
+          const target = terminalTargets[idx]
+          const summary = await shutdownRoomTerminals(target.roomId)
+          console.log(summarizeShutdown(target.roomId, summary))
+        }
+        if (indices.length > 0) await Bun.sleep(700)
+      }
+      continue
+    }
+
     if (choice === 'c' || choice === 'close') {
       if (rooms.length === 0) { console.log(`  ${C.gray}No rooms to close.${C.reset}`); await Bun.sleep(700); continue }
       console.log()
@@ -328,18 +369,17 @@ async function main(): Promise<void> {
       const pick = (await prompt(rl, `\n  ${C.gray}Close room # — single or comma-separated (e.g. 1,2,3):${C.reset} `)).trim()
       if (pick) {
         const sorted = [...rooms].sort((a, b) => a.id.localeCompare(b.id))
-        const indices = pick.split(',')
-          .map(s => parseInt(s.trim(), 10) - 1)
-          .filter(i => !isNaN(i) && i >= 0 && i < sorted.length)
-        const unique = [...new Set(indices)]
-        for (const idx of unique) {
+        const indices = parseSelection(pick, sorted.length)
+        for (const idx of indices) {
           const target = sorted[idx].id
           const ok = await closeRoom(target)
+          const shutdown = await shutdownRoomTerminals(target)
           console.log(ok
             ? `  ${C.bgreen}✓${C.reset}  ${C.bold}${target}${C.reset} closed.`
             : `  ${C.red}✗${C.reset}  Failed to close ${target}.`)
+          console.log(summarizeShutdown(target, shutdown))
         }
-        if (unique.length > 0) await Bun.sleep(700)
+        if (indices.length > 0) await Bun.sleep(700)
       }
       continue
     }

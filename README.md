@@ -96,7 +96,7 @@ This opens an interactive terminal UI:
   ENG-1234   claude ✓  codex ✓   12m ago
   ENG-5678   claude ✓  codex ✗    3m ago
 
-  [o] open new room   [c] close room   [r] refresh   [q] quit
+  [o] open new room   [c] close room   [t] stop terminals   [r] refresh   [q] quit
 
   > o
   Ticket number (e.g. ENG-1234): ENG-9999
@@ -107,6 +107,8 @@ This opens an interactive terminal UI:
 
 The bridge server starts automatically if not already running.  
 Rooms stay open until you explicitly close them with `[c]`.
+Closing a room from `covering-bridge` also sends `SIGTERM` and a `SIGKILL` fallback to the room's `bridge-claude` / `bridge-codex` processes when they are still running.
+Use `[t]` when you want to stop bridge-launched terminals without deleting the room itself.
 
 **Terminal support:**
 - **tmux** — new window, split-pane (claude left, codex right)
