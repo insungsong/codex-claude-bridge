@@ -219,6 +219,17 @@ function deliverMessageToClaude(
   }
 }
 
+// ── Token authorization ──
+
+function checkToken(req: Request, room: RoomState): Response | null {
+  const provided = req.headers.get('x-bridge-token')
+  if (!provided || provided !== room.sessionToken) {
+    process.stderr.write(`[bridge] auth rejected: roomId=${room.id}\n`)
+    return Response.json({ error: 'bad token' }, { status: 401 })
+  }
+  return null
+}
+
 // ── HTTP server ──
 
 Bun.serve({
@@ -393,6 +404,8 @@ Bun.serve({
     if (sub === 'from-codex' && req.method === 'POST') {
       return (async () => {
         const room = getOrCreateRoom(roomId)
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
         touchRoom(room)
         pruneExpiredPendingReplies(room)
 

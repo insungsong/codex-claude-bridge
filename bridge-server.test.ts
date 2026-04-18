@@ -46,4 +46,41 @@ describe('session token', () => {
     const body = await res.json()
     expect(body.sessionToken).toMatch(/^[a-f0-9]{32}$/)
   })
+
+  test('POST /from-codex without token returns 401', async () => {
+    await fetch(`${BASE}/api/rooms/ENG-TEST-2`, { method: 'POST' })
+    const res = await fetch(`${BASE}/api/rooms/ENG-TEST-2/from-codex`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'hi' }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  test('POST /from-codex with correct token succeeds', async () => {
+    const create = await fetch(`${BASE}/api/rooms/ENG-TEST-3`, { method: 'POST' })
+    const { sessionToken } = await create.json() as { sessionToken: string }
+    const res = await fetch(`${BASE}/api/rooms/ENG-TEST-3/from-codex`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-bridge-token': sessionToken,
+      },
+      body: JSON.stringify({ message: 'hi' }),
+    })
+    expect([200, 201]).toContain(res.status)
+  })
+
+  test('POST /from-codex with wrong token returns 401', async () => {
+    await fetch(`${BASE}/api/rooms/ENG-TEST-4`, { method: 'POST' })
+    const res = await fetch(`${BASE}/api/rooms/ENG-TEST-4/from-codex`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-bridge-token': 'deadbeef'.repeat(4),
+      },
+      body: JSON.stringify({ message: 'hi' }),
+    })
+    expect(res.status).toBe(401)
+  })
 })
