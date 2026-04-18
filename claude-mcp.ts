@@ -62,8 +62,9 @@ function getRoomAndTokenFromPidFile(): { roomId: string; token: string } {
   return { roomId: '', token: '' }
 }
 
-const { roomId: pidFileRoom } = getRoomAndTokenFromPidFile()
+const { roomId: pidFileRoom, token: pidFileToken } = getRoomAndTokenFromPidFile()
 const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || pidFileRoom
+const BRIDGE_TOKEN = process.env.CODEX_BRIDGE_TOKEN || pidFileToken
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const POLL_TIMEOUT_MS = 30000
 const POLL_BACKOFF_MS = 1000
@@ -74,7 +75,42 @@ if (!ROOM_ID) {
   process.exit(1)
 }
 
+if (!BRIDGE_TOKEN) {
+  process.stderr.write('claude-mcp: session token not found — use bridge-claude wrapper or set CODEX_BRIDGE_TOKEN\n')
+  process.exit(1)
+}
+
 const BASE = `${BRIDGE_URL}/api/rooms/${encodeURIComponent(ROOM_ID)}`
+const AUTH_HEADERS = { 'x-bridge-token': BRIDGE_TOKEN } as const
+
+function mergeHeaders(base?: HeadersInit): Record<string, string> {
+  if (!base) return { ...AUTH_HEADERS }
+  if (base instanceof Headers) {
+    const out: Record<string, string> = {}
+    base.forEach((v, k) => { out[k] = v })
+    return { ...out, ...AUTH_HEADERS }
+  }
+  if (Array.isArray(base)) {
+    return { ...Object.fromEntries(base), ...AUTH_HEADERS }
+  }
+  return { ...(base as Record<string, string>), ...AUTH_HEADERS }
+}
+
+async function bridgeFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BASE}${path}`, {
+    ...init,
+    headers: mergeHeaders(init?.headers),
+  })
+}
+
+function failAuth(status: number, where: string): never {
+  process.stderr.write(`[claude-mcp] ${where} returned ${status} — exiting\n`)
+  process.exit(0)
+}
+
+function exitOnAuthFail(status: number, where: string): void {
+  if (status === 401 || status === 404) failAuth(status, where)
+}
 
 // ── MCP server ──
 
@@ -138,11 +174,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'reply': {
         const text = args.text as string
         const replyTo = args.reply_to as string | undefined
-        const res = await fetch(`${BASE}/from-claude`, {
+        const res = await bridgeFetch('/from-claude', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ text, replyTo, proactive: false }),
         })
+        exitOnAuthFail(res.status, 'reply/from-claude')
         if (!res.ok) throw new Error(`bridge error: ${res.status}`)
         const { id } = await res.json() as { id: string }
         return { content: [{ type: 'text', text: `sent (${id})` }] }
@@ -150,11 +187,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
       case 'send_to_codex': {
         const text = args.text as string
-        const res = await fetch(`${BASE}/from-claude`, {
+        const res = await bridgeFetch('/from-claude', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ text, proactive: true }),
         })
+        exitOnAuthFail(res.status, 'send_to_codex/from-claude')
         if (!res.ok) throw new Error(`bridge error: ${res.status}`)
         const { id } = await res.json() as { id: string }
         return { content: [{ type: 'text', text: `sent to codex (${id})` }] }
@@ -183,8 +221,8 @@ const CLAUDE_HEARTBEAT_INTERVAL_MS = 1000
 
 async function heartbeat() {
   try {
-    const res = await fetch(`${BASE}/claude/connect`, { method: 'POST', signal: AbortSignal.timeout(5000) })
-    if (res.status === 404) {
+    const res = await bridgeFetch('/claude/connect', { method: 'POST', signal: AbortSignal.timeout(5000) })
+    if (res.status === 401 || res.status === 404) {
       process.stderr.write(`[claude-mcp] room ${ROOM_ID} closed — exiting\n`)
       process.exit(0)
     }
@@ -193,7 +231,7 @@ async function heartbeat() {
 
 async function unregister() {
   try {
-    await fetch(`${BASE}/claude/connect`, { method: 'DELETE', signal: AbortSignal.timeout(3000) })
+    await bridgeFetch('/claude/connect', { method: 'DELETE', signal: AbortSignal.timeout(3000) })
   } catch {}
 }
 
@@ -218,10 +256,11 @@ async function deliverToClaude(id: string, text: string, sender: string) {
 async function pollLoop() {
   while (true) {
     try {
-      const res = await fetch(
-        `${BASE}/pending-for-claude?timeout=${POLL_TIMEOUT_MS}`,
+      const res = await bridgeFetch(
+        `/pending-for-claude?timeout=${POLL_TIMEOUT_MS}`,
         { signal: AbortSignal.timeout(POLL_TIMEOUT_MS + 5000) },
       )
+      exitOnAuthFail(res.status, 'pollLoop/pending-for-claude')
       if (!res.ok) {
         await Bun.sleep(POLL_BACKOFF_MS)
         continue
