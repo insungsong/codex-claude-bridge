@@ -275,6 +275,7 @@ Each room has its own isolated state: pending replies, in-flight deduplication, 
 - `--dangerously-load-development-channels` flag is required for Claude Code (Channels are a research preview).
 - Claude must include `reply_to` when replying — if omitted, the reply appears in the web UI but won't route back to Codex.
 - Session tokens are in-memory only: restarting `bridge-server` invalidates all tokens issued before the restart. Running MCP processes will exit on next heartbeat (401 or 404), and wrapper scripts need to be re-run to obtain new tokens.
+- Reopening a room within the 10-second tombstone window: the wrapper will successfully fetch a new token (`POST /api/rooms/:roomId` stays open for issuance), but the spawned MCP's first heartbeat will hit the tombstone and return 404, causing the MCP to exit immediately. Wait 10 seconds after closing a room before rerunning the wrapper.
 
 ---
 
