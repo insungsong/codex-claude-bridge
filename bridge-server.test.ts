@@ -83,4 +83,45 @@ describe('session token', () => {
     })
     expect(res.status).toBe(401)
   })
+
+  test('token from room A is rejected on room B endpoint', async () => {
+    const a = await fetch(`${BASE}/api/rooms/ROOM-A`, { method: 'POST' })
+    const { sessionToken: tokenA } = await a.json() as { sessionToken: string }
+    await fetch(`${BASE}/api/rooms/ROOM-B`, { method: 'POST' })
+
+    const res = await fetch(`${BASE}/api/rooms/ROOM-B/from-codex`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-bridge-token': tokenA },
+      body: JSON.stringify({ message: 'intrude' }),
+    })
+    expect(res.status).toBe(401)
+  })
+
+  test('heartbeat endpoints require token', async () => {
+    await fetch(`${BASE}/api/rooms/ROOM-HB`, { method: 'POST' })
+    const res = await fetch(`${BASE}/api/rooms/ROOM-HB/codex/heartbeat`, { method: 'POST' })
+    expect(res.status).toBe(401)
+  })
+
+  test('room recreation rotates token — old token rejected', async () => {
+    const c1 = await fetch(`${BASE}/api/rooms/ROOM-ROT`, { method: 'POST' })
+    const { sessionToken: oldToken } = await c1.json() as { sessionToken: string }
+
+    await fetch(`${BASE}/api/rooms/ROOM-ROT`, { method: 'DELETE' })
+    await Bun.sleep(10_100)  // tombstone expires at 10s
+    await fetch(`${BASE}/api/rooms/ROOM-ROT`, { method: 'POST' })
+
+    const res = await fetch(`${BASE}/api/rooms/ROOM-ROT/codex/heartbeat`, {
+      method: 'POST',
+      headers: { 'x-bridge-token': oldToken },
+    })
+    expect(res.status).toBe(401)
+  }, 15000)
+
+  test('/api/health and /api/rooms remain open (no token)', async () => {
+    const h = await fetch(`${BASE}/api/health`)
+    expect(h.status).toBe(200)
+    const r = await fetch(`${BASE}/api/rooms`)
+    expect(r.status).toBe(200)
+  })
 })

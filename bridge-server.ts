@@ -240,6 +240,10 @@ Bun.serve({
     const path = url.pathname
 
     // WebSocket upgrade — /ws/:roomId
+    // NOTE: WebSocket path still uses getOrCreateRoom — token gating for WS
+    // handshakes requires a query-string token (no custom headers available in
+    // browser upgrade requests) and is deferred to a later task. Phantom room
+    // creation via /ws/:roomId is a known gap, not addressed in P0 session-token.
     if (path.startsWith('/ws/') && req.headers.get('upgrade') === 'websocket') {
       const roomId = decodeURIComponent(path.slice(4))
       if (!roomId) return new Response('missing room', { status: 400 })
@@ -311,11 +315,15 @@ Bun.serve({
     const roomId = decodeURIComponent(roomMatch[1])
     const sub = roomMatch[2]
 
-    // Claude connect — auto-creates room on first heartbeat (unless tombstoned)
+    // Claude connect — room must exist (legitimate clients POST /api/rooms/:id first)
+    // Order: isTombstoned → rooms.get+404 → checkToken → business logic
     if (sub === 'claude/connect') {
       if (req.method === 'POST') {
         if (isTombstoned(roomId)) return new Response(null, { status: 404 })
-        const room = getOrCreateRoom(roomId)
+        const room = rooms.get(roomId)
+        if (!room) return new Response('room not found', { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
         room.claudeLastSeen = Date.now()
         touchRoom(room)
         process.stderr.write(`[bridge] claude connected: ${roomId}\n`)
@@ -323,24 +331,36 @@ Bun.serve({
       }
       if (req.method === 'DELETE') {
         const room = rooms.get(roomId)
-        if (room) { room.claudeLastSeen = 0; touchRoom(room) }
+        if (!room) return new Response('room not found', { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
+        room.claudeLastSeen = 0
+        touchRoom(room)
         process.stderr.write(`[bridge] claude disconnected: ${roomId}\n`)
         return new Response(null, { status: 204 })
       }
     }
 
-    // Codex heartbeat — auto-creates room on first heartbeat (unless tombstoned)
+    // Codex heartbeat/connect — room must exist (legitimate clients POST /api/rooms/:id first)
+    // Order: isTombstoned → rooms.get+404 → checkToken → business logic
     if (sub === 'codex/heartbeat' || sub === 'codex/connect') {
       if (req.method === 'POST') {
         if (isTombstoned(roomId)) return new Response(null, { status: 404 })
-        const room = getOrCreateRoom(roomId)
+        const room = rooms.get(roomId)
+        if (!room) return new Response('room not found', { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
         room.codexLastSeen = Date.now()
         touchRoom(room)
         return new Response(null, { status: 204 })
       }
       if (req.method === 'DELETE') {
         const room = rooms.get(roomId)
-        if (room) { room.codexLastSeen = 0; touchRoom(room) }
+        if (!room) return new Response('room not found', { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
+        room.codexLastSeen = 0
+        touchRoom(room)
         return new Response(null, { status: 204 })
       }
     }
@@ -349,6 +369,8 @@ Bun.serve({
     if (sub === 'pending-for-claude' && req.method === 'GET') {
       const room = rooms.get(roomId)
       if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+      const authFail = checkToken(req, room)
+      if (authFail) return authFail
       room.claudeLastSeen = Date.now()  // each poll = heartbeat for Claude liveness
       touchRoom(room)
       const timeout = Number(url.searchParams.get('timeout') ?? 30000)
@@ -386,6 +408,8 @@ Bun.serve({
       return (async () => {
         const room = rooms.get(roomId)
         if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
         touchRoom(room)
         const body = await req.json() as { text: string; replyTo?: string; proactive?: boolean }
         const { text, replyTo, proactive } = body
@@ -401,9 +425,12 @@ Bun.serve({
     }
 
     // POST /api/rooms/:roomId/from-codex — Codex sends to Claude
+    // rooms.get + 404: prevents phantom room creation on unauthenticated HTTP gate calls
+    // (note: /ws/:roomId upgrade path still auto-creates — see upgrade handler)
     if (sub === 'from-codex' && req.method === 'POST') {
       return (async () => {
-        const room = getOrCreateRoom(roomId)
+        const room = rooms.get(roomId)
+        if (!room) return new Response('room not found', { status: 404 })
         const authFail = checkToken(req, room)
         if (authFail) return authFail
         touchRoom(room)
@@ -438,7 +465,9 @@ Bun.serve({
     const pollMatch = sub.match(/^poll-reply\/(.+)$/)
     if (pollMatch && req.method === 'GET') {
       const room = rooms.get(roomId)
-      if (!room) return Response.json({ timeout: true, reply: null })
+      if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+      const authFail = checkToken(req, room)
+      if (authFail) return authFail
       pruneExpiredPendingReplies(room)
       touchRoom(room)
 
@@ -480,7 +509,9 @@ Bun.serve({
     // GET /api/rooms/:roomId/pending-for-codex
     if (sub === 'pending-for-codex' && req.method === 'GET') {
       const room = rooms.get(roomId)
-      if (!room) return Response.json({ messages: [] })
+      if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+      const authFail = checkToken(req, room)
+      if (authFail) return authFail
       pruneExpiredPendingReplies(room)
       touchRoom(room)
       const messages = [...room.pendingForCodex.splice(0), ...drainLateRepliesForCodex(room)]
