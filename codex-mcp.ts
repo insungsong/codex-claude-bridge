@@ -53,17 +53,55 @@ function getRoomAndTokenFromPidFile(): { roomId: string; token: string } {
   }
 }
 
-const { roomId: pidFileRoom } = getRoomAndTokenFromPidFile()
+const { roomId: pidFileRoom, token: pidFileToken } = getRoomAndTokenFromPidFile()
 const ROOM_ID = process.env.CODEX_BRIDGE_ROOM || pidFileRoom
+const BRIDGE_TOKEN = process.env.CODEX_BRIDGE_TOKEN || pidFileToken
 
 if (!ROOM_ID) {
   process.stderr.write(
-    'codex-mcp: room not found — set CODEX_BRIDGE_ROOM or use covering-bridge to open rooms\n',
+    'codex-mcp: room not found — set CODEX_BRIDGE_ROOM or use bridge-codex to open rooms\n',
+  )
+  process.exit(1)
+}
+
+if (!BRIDGE_TOKEN) {
+  process.stderr.write(
+    'codex-mcp: session token not found — use bridge-codex wrapper or set CODEX_BRIDGE_TOKEN\n',
   )
   process.exit(1)
 }
 
 const BASE = `${BRIDGE_URL}/api/rooms/${encodeURIComponent(ROOM_ID)}`
+const AUTH_HEADERS = { 'x-bridge-token': BRIDGE_TOKEN } as const
+
+function mergeHeaders(base?: HeadersInit): Record<string, string> {
+  if (!base) return { ...AUTH_HEADERS }
+  if (base instanceof Headers) {
+    const out: Record<string, string> = {}
+    base.forEach((v, k) => { out[k] = v })
+    return { ...out, ...AUTH_HEADERS }
+  }
+  if (Array.isArray(base)) {
+    return { ...Object.fromEntries(base), ...AUTH_HEADERS }
+  }
+  return { ...(base as Record<string, string>), ...AUTH_HEADERS }
+}
+
+async function bridgeFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${BASE}${path}`, {
+    ...init,
+    headers: mergeHeaders(init?.headers),
+  })
+}
+
+function failAuth(status: number, where: string): never {
+  process.stderr.write(`[codex-mcp] ${where} returned ${status} — exiting\n`)
+  process.exit(0)
+}
+
+function exitOnAuthFail(status: number, where: string): void {
+  if (status === 401 || status === 404) failAuth(status, where)
+}
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
@@ -136,11 +174,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const startedAt = Date.now()
 
           // Send message to bridge
-          const sendRes = await fetch(`${BASE}/from-codex`, {
+          const sendRes = await bridgeFetch('/from-codex', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ message: message.trim() }),
           })
+          exitOnAuthFail(sendRes.status, 'send_to_claude/from-codex')
 
           if (!sendRes.ok) {
             const err = await sendRes.text()
@@ -161,8 +200,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             let pollRes: Response
 
             try {
-              pollRes = await fetch(
-                `${BASE}/poll-reply/${id}?timeout=${pollTimeoutMs}`,
+              pollRes = await bridgeFetch(
+                `/poll-reply/${id}?timeout=${pollTimeoutMs}`,
                 { signal: controller.signal },
               )
             } catch (e: unknown) {
@@ -172,6 +211,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               throw e
             }
             clearTimeout(clientTimeout)
+            exitOnAuthFail(pollRes.status, 'send_to_claude/poll-reply')
 
             if (!pollRes.ok) {
               const errText = await pollRes.text()
@@ -216,7 +256,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
 
       case 'check_claude_messages': {
-        const res = await fetch(`${BASE}/pending-for-codex`)
+        const res = await bridgeFetch('/pending-for-codex')
+        exitOnAuthFail(res.status, 'check_claude_messages')
         if (!res.ok) {
           return {
             content: [{ type: 'text', text: `error checking messages: ${res.status}` }],
@@ -264,8 +305,8 @@ async function heartbeat() {
     process.exit(0)
   }
   try {
-    const res = await fetch(`${BASE}/codex/heartbeat`, { method: 'POST', signal: AbortSignal.timeout(5000) })
-    if (res.status === 404) {
+    const res = await bridgeFetch('/codex/heartbeat', { method: 'POST', signal: AbortSignal.timeout(5000) })
+    if (res.status === 401 || res.status === 404) {
       process.stderr.write(`[codex-mcp] room ${ROOM_ID} closed — exiting\n`)
       process.exit(0)
     }
@@ -274,7 +315,7 @@ async function heartbeat() {
 
 async function unregister() {
   try {
-    await fetch(`${BASE}/codex/heartbeat`, { method: 'DELETE', signal: AbortSignal.timeout(3000) })
+    await bridgeFetch('/codex/heartbeat', { method: 'DELETE', signal: AbortSignal.timeout(3000) })
   } catch {}
 }
 
