@@ -14,6 +14,7 @@ import { writeFileSync, mkdirSync } from 'fs'
 import { readFileSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname } from 'path'
+import { randomBytes } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
 const PORT = Number(process.env.CODEX_BRIDGE_PORT ?? 8788)
@@ -76,6 +77,7 @@ type RoomState = {
   // Codex → Claude delivery queue (polled by claude-mcp.ts)
   pendingForClaude: { id: string; text: string; sender: string; replyTo?: string }[]
   pendingForClaudeWaiters: Set<ClaudeWaiter>
+  readonly sessionToken: string
   // WebSocket clients for this room's web UI
   clients: Set<ServerWebSocket<unknown>>
 }
@@ -118,6 +120,7 @@ function getOrCreateRoom(roomId: string): RoomState {
       pendingForCodex: [],
       pendingForClaude: [],
       pendingForClaudeWaiters: new Set(),
+      sessionToken: randomBytes(16).toString('hex'),
       clients: new Set(),
     })
     process.stderr.write(`[bridge] room created: ${roomId}\n`)
@@ -262,8 +265,9 @@ Bun.serve({
     const closeMatch = path.match(/^\/api\/rooms\/([^/]+)$/)
     if (closeMatch && req.method === 'POST') {
       const roomId = decodeURIComponent(closeMatch[1])
-      getOrCreateRoom(roomId)
-      return new Response(null, { status: 201 })
+      const had = rooms.has(roomId)
+      const room = getOrCreateRoom(roomId)
+      return Response.json({ sessionToken: room.sessionToken }, { status: had ? 200 : 201 })
     }
     if (closeMatch && req.method === 'DELETE') {
       const roomId = decodeURIComponent(closeMatch[1])
