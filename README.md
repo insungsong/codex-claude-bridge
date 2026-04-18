@@ -124,17 +124,71 @@ Start the central server once:
 bun bridge-server.ts
 ```
 
-Then for each room, open two terminals:
+Then for each room, open two terminals and run the wrapper scripts:
 
 ```bash
 # Terminal 1 — Claude
-CODEX_BRIDGE_ROOM=ENG-1234 claude --dangerously-load-development-channels server:codex-bridge
+./bridge-claude ENG-1234
 
 # Terminal 2 — Codex
-CODEX_BRIDGE_ROOM=ENG-1234 codex --full-auto
+./bridge-codex ENG-1234
 ```
 
-Repeat with a different `CODEX_BRIDGE_ROOM` value for each additional room.
+The wrappers register the room with the bridge server via `POST /api/rooms/:roomId`, receive a session token, write it to `/tmp/(claude|codex)-bridge-room-$$` in `roomId:token` format, and exec the respective CLI. The MCP processes then authenticate every request with this token via the `x-bridge-token` header.
+
+For environments where the wrapper can't be used (e.g., custom MCP launchers), obtain a token manually:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8788/api/rooms/ENG-1234 | grep -o '"sessionToken":"[^"]*"' | cut -d'"' -f4)
+CODEX_BRIDGE_ROOM=ENG-1234 CODEX_BRIDGE_TOKEN=$TOKEN codex --full-auto
+```
+
+---
+
+## E2E verification
+
+After installation, verify the token plumbing end-to-end:
+
+```bash
+# 1. Start the bridge-server on a test port (so you don't collide with a running one)
+CODEX_BRIDGE_PORT=18788 bun bridge-server.ts &
+SERVER_PID=$!
+sleep 1
+
+# 2. Create a room and capture the token
+TOKEN=$(curl -s -X POST http://localhost:18788/api/rooms/ENG-E2E | \
+  grep -o '"sessionToken":"[^"]*"' | cut -d'"' -f4)
+echo "token: $TOKEN"
+
+# 3. Confirm auth is enforced: request WITHOUT token returns 401
+curl -s -o /dev/null -w "no-token → %{http_code}\n" \
+  -X POST http://localhost:18788/api/rooms/ENG-E2E/codex/heartbeat
+# expected: no-token → 401
+
+# 4. Confirm correct token succeeds: heartbeat with token returns 204
+curl -s -o /dev/null -w "with-token → %{http_code}\n" \
+  -X POST http://localhost:18788/api/rooms/ENG-E2E/codex/heartbeat \
+  -H "x-bridge-token: $TOKEN"
+# expected: with-token → 204
+
+# 5. Cross-room leak check: token from ENG-E2E rejected on different room
+curl -s -X POST http://localhost:18788/api/rooms/ENG-E2E-OTHER > /dev/null
+curl -s -o /dev/null -w "cross-room → %{http_code}\n" \
+  -X POST http://localhost:18788/api/rooms/ENG-E2E-OTHER/codex/heartbeat \
+  -H "x-bridge-token: $TOKEN"
+# expected: cross-room → 401
+
+# 6. Cleanup
+kill $SERVER_PID
+```
+
+If all three `%{http_code}` values match the expected status codes, the session token feature is working correctly.
+
+For full automated coverage, run the test suite:
+
+```bash
+bun test
+```
 
 ---
 
@@ -220,6 +274,8 @@ Each room has its own isolated state: pending replies, in-flight deduplication, 
 - Both agents must be on the same machine (localhost bridge).
 - `--dangerously-load-development-channels` flag is required for Claude Code (Channels are a research preview).
 - Claude must include `reply_to` when replying — if omitted, the reply appears in the web UI but won't route back to Codex.
+- Session tokens are in-memory only: restarting `bridge-server` invalidates all tokens issued before the restart. Running MCP processes will exit on next heartbeat (401 or 404), and wrapper scripts need to be re-run to obtain new tokens.
+- Reopening a room within the 10-second tombstone window: the wrapper will successfully fetch a new token (`POST /api/rooms/:roomId` stays open for issuance), but the spawned MCP's first heartbeat will hit the tombstone and return 404, causing the MCP to exit immediately. Wait 10 seconds after closing a room before rerunning the wrapper.
 
 ---
 
