@@ -177,7 +177,7 @@ if (authFail) return authFail
 | 엔드포인트 | 메서드 | 토큰 필요? | 사유 |
 |---|---|---|---|
 | `/api/rooms/:roomId` | POST | ❌ | 토큰 발급 경로 |
-| `/api/rooms/:roomId` | DELETE | ✅ | 방 삭제는 민감 |
+| `/api/rooms/:roomId` | DELETE | ❌ | 관리 작업, covering-bridge CLI가 호출. 같은 Mac 신뢰 모델에 포함 (사용자 실수 방지는 CLI 확인 프롬프트가 담당) |
 | `/api/rooms/:roomId/claude/connect` | POST/DELETE | ✅ | 연결 위조 방지 |
 | `/api/rooms/:roomId/codex/connect` | POST | ✅ | 연결 위조 방지 |
 | `/api/rooms/:roomId/codex/heartbeat` | POST | ✅ | heartbeat 위조 방지 |
