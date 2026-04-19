@@ -10,14 +10,18 @@
  * covering-bridge.ts uses GET /api/rooms to show room status.
  */
 
-import { writeFileSync, mkdirSync } from 'fs'
-import { readFileSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync } from 'fs'
+import { renameSync, existsSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, extname } from 'path'
 import { randomBytes } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
 const PORT = Number(process.env.CODEX_BRIDGE_PORT ?? 8788)
+const STATE_FILE = process.env.CODEX_BRIDGE_STATE_FILE ?? '/tmp/codex-bridge-state.json'
+const PERSIST_VERSION = 1
+const STALE_CUTOFF_MS = 60 * 60 * 1000  // 1 hour
+const PERSIST_DEBOUNCE_MS = 500
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'codex-bridge')
 const FILES_DIR = join(STATE_DIR, 'files')
 
@@ -80,6 +84,28 @@ type RoomState = {
   readonly sessionToken: string
   // WebSocket clients for this room's web UI
   clients: Set<ServerWebSocket<unknown>>
+}
+
+type SerializedPendingReply = {
+  msgId: string
+  createdAt: number
+  normalizedMessage?: string
+  reply?: string
+}
+
+type SerializedRoom = {
+  id: string
+  createdAt: number
+  sessionToken: string
+  lastActivity: number
+  pendingForCodex: { id: string; text: string }[]
+  pendingReplies: SerializedPendingReply[]
+}
+
+type PersistedState = {
+  version: number
+  savedAt: number
+  rooms: SerializedRoom[]
 }
 
 function isClaudeConnected(room: RoomState) {
