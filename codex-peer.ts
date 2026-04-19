@@ -43,6 +43,12 @@ type CodexPeerPromptOptions = {
   message: string
 }
 
+export function buildCodexCompanionArgs() {
+  return [
+    '-c', 'mcp_servers.codex-bridge.enabled=false',
+  ]
+}
+
 export function buildCodexExecArgs(options: CodexExecArgsOptions) {
   const args = [
     'exec',
@@ -84,6 +90,9 @@ function getRoomAndTokenFromPidFile(): { roomId: string; token: string } {
 }
 
 const { roomId: pidFileRoom, token: pidFileToken } = getRoomAndTokenFromPidFile()
+const PARENT_PID = Number(process.env.CODEX_BRIDGE_PARENT_PID ?? '')
+const PID_FILE = process.env.CODEX_BRIDGE_PID_FILE
+
 type RuntimeConfig = {
   roomId: string
   bridgeToken: string
@@ -157,6 +166,9 @@ async function unregister(bridgeFetch: (path: string, init?: RequestInit) => Pro
   try {
     await bridgeFetch('/claude/connect', { method: 'DELETE', signal: AbortSignal.timeout(3000) })
   } catch {}
+  if (PID_FILE) {
+    try { unlinkSync(PID_FILE) } catch {}
+  }
 }
 
 async function markInProgress(
@@ -288,6 +300,16 @@ if (import.meta.main) {
   process.on('exit', () => { void unregister(bridgeFetch) })
   process.on('SIGINT', () => { void unregister(bridgeFetch).finally(() => process.exit(0)) })
   process.on('SIGTERM', () => { void unregister(bridgeFetch).finally(() => process.exit(0)) })
+
+  if (Number.isInteger(PARENT_PID) && PARENT_PID > 0) {
+    setInterval(() => {
+      try {
+        process.kill(PARENT_PID, 0)
+      } catch {
+        process.exit(0)
+      }
+    }, 1000)
+  }
 
   await heartbeat(config, bridgeFetch)
   setInterval(() => { void heartbeat(config, bridgeFetch) }, HEARTBEAT_INTERVAL_MS)

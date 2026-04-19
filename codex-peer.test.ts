@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildCodexExecArgs, buildCodexPeerPrompt } from './codex-peer'
+import { buildCodexCompanionArgs, buildCodexExecArgs, buildCodexPeerPrompt } from './codex-peer'
 
 describe('codex peer runner', () => {
   test('disables the bridge MCP when invoking codex exec', () => {
@@ -31,5 +31,13 @@ describe('codex peer runner', () => {
     expect(prompt).toContain('message codex-123')
     expect(prompt).toContain('Compare Redis and Memcached for this repo.')
     expect(prompt).toContain('Respond with the final reply text only')
+  })
+
+  test('builds companion codex args that disable the bridge MCP', () => {
+    const args = buildCodexCompanionArgs()
+
+    expect(args).toEqual([
+      '-c', 'mcp_servers.codex-bridge.enabled=false',
+    ])
   })
 })

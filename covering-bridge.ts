@@ -165,6 +165,34 @@ function getTerminalTargets() {
     }))
 }
 
+function inferAssistantTypeFromSessions(roomId: string, sessions: ReturnType<typeof getTerminalSessions>): 'claude' | 'codex' | null {
+  const session = sessions.get(roomId)
+  if (!session) return null
+  if (session.codexPeer.length > 0) return 'codex'
+  if (session.claude.length > 0) return 'claude'
+  return null
+}
+
+function displayAssistantType(room: Room, sessions: ReturnType<typeof getTerminalSessions>): 'claude' | 'codex' {
+  return inferAssistantTypeFromSessions(room.id, sessions) ?? roomAssistantType(room)
+}
+
+function displayAssistantLabel(room: Room, sessions: ReturnType<typeof getTerminalSessions>): string {
+  return displayAssistantType(room, sessions) === 'codex' ? 'codex-peer' : 'claude'
+}
+
+function displayAssistantColor(room: Room, sessions: ReturnType<typeof getTerminalSessions>): string {
+  return displayAssistantType(room, sessions) === 'codex' ? C.bcyan : C.bpurple
+}
+
+function terminalSummaryParts(session: { claude: number[]; codex: number[]; codexPeer: number[] }) {
+  const parts: string[] = []
+  if (session.codexPeer.length > 0) parts.push(`codex-peer ×${session.codexPeer.length}`)
+  if (session.claude.length > 0) parts.push(`claude ×${session.claude.length}`)
+  if (session.codex.length > 0) parts.push(`codex ×${session.codex.length}`)
+  return parts
+}
+
 function summarizeShutdown(roomId: string, summary: Awaited<ReturnType<typeof shutdownRoomTerminals>>): string {
   if (summary.matched === 0) {
     return `  ${C.gray}•${C.reset}  ${roomId}: no bridge-launched terminals found.`
@@ -183,11 +211,12 @@ function summarizeShutdown(roomId: string, summary: Awaited<ReturnType<typeof sh
 function printRooms(rooms: Room[]): void {
   console.clear()
   console.log()
+  const sessions = getTerminalSessions()
 
   // ── Header ──
   console.log(boxTop())
-  console.log(boxRow(`  ${C.bold}${C.bcyan}◈  Codex · Claude Bridge${C.reset}  ${C.dim}룸 관리 대시보드${C.reset}  ${C.gray}${VERSION}${C.reset}`))
-  console.log(boxRow(`     ${C.dim}multi-room agent bridge${C.reset}`))
+  console.log(boxRow(`  ${C.bold}${C.bcyan}◈  Codex Bridge${C.reset}  ${C.dim}룸 관리 대시보드${C.reset}  ${C.gray}${VERSION}${C.reset}`))
+  console.log(boxRow(`     ${C.dim}multi-room claude/codex-peer bridge${C.reset}`))
   console.log(boxBottom())
   console.log()
 
@@ -204,26 +233,22 @@ function printRooms(rooms: Room[]): void {
   } else {
     for (const r of [...rooms].sort((a, b) => a.id.localeCompare(b.id))) {
       const codex  = agentDot(r.codexConnected,  C.bgreen)
-      const assistant = agentDot(roomAssistantConnected(r), roomAssistantColor(r))
+      const assistant = agentDot(roomAssistantConnected(r), displayAssistantColor(r, sessions))
       const codexL  = r.codexConnected  ? `${C.green}codex${C.reset}`  : `${C.gray}codex${C.reset}`
       const assistantL = roomAssistantConnected(r)
-        ? `${roomAssistantColor(r)}${roomAssistantLabel(r)}${C.reset}`
-        : `${C.gray}${roomAssistantLabel(r)}${C.reset}`
+        ? `${displayAssistantColor(r, sessions)}${displayAssistantLabel(r, sessions)}${C.reset}`
+        : `${C.gray}${displayAssistantLabel(r, sessions)}${C.reset}`
       const id  = rpad(`${C.bold}${r.id}${C.reset}`, 14)
       const age = formatAge(r.lastActivity)
       console.log(`  ${id}  ${codex} ${codexL}   ${assistant} ${assistantL}   ${age}`)
     }
   }
   // ── Terminal sessions (dim) ──
-  const sessions = getTerminalSessions()
   if (sessions.size > 0) {
     const sorted = [...sessions.entries()].sort(([a], [b]) => a.localeCompare(b))
     console.log(`  ${C.dim}terminals${C.reset}`)
     for (const [roomId, s] of sorted) {
-      const parts: string[] = []
-      if (s.claude.length > 0) parts.push(`claude ×${s.claude.length}`)
-      if (s.codex.length  > 0) parts.push(`codex ×${s.codex.length}`)
-      if (s.codexPeer.length > 0) parts.push(`codex-peer ×${s.codexPeer.length}`)
+      const parts = terminalSummaryParts(s)
       const label = parts.length > 0 ? parts.join('   ') : 'no active terminals'
       console.log(`  ${C.dim}${roomId.padEnd(14)}  ${label}${C.reset}`)
     }

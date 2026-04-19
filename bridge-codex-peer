@@ -15,6 +15,12 @@ fi
 
 BRIDGE_URL="${CODEX_BRIDGE_URL:-http://localhost:8788}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+. "$SCRIPT_DIR/bridge-common.sh"
+
+if ! bridge_ensure_server; then
+  echo "bridge-codex-peer: failed to reach bridge-server at $BRIDGE_URL" >&2
+  exit 1
+fi
 
 if ! RESP=$(curl -s -f -X POST "$BRIDGE_URL/api/rooms/$ROOM" \
   -H 'content-type: application/json' \
@@ -30,5 +36,15 @@ if [ -z "$TOKEN" ]; then
   exit 1
 fi
 
-printf "%s:%s" "$ROOM" "$TOKEN" > "/tmp/codex-peer-bridge-room-$$"
-exec bun "$SCRIPT_DIR/codex-peer.ts"
+PID_FILE="/tmp/codex-peer-bridge-room-$$"
+printf "%s:%s" "$ROOM" "$TOKEN" > "$PID_FILE"
+
+CODEX_BRIDGE_ROOM="$ROOM" \
+CODEX_BRIDGE_TOKEN="$TOKEN" \
+CODEX_BRIDGE_URL="$BRIDGE_URL" \
+CODEX_BRIDGE_PARENT_PID="$$" \
+CODEX_BRIDGE_PID_FILE="$PID_FILE" \
+nohup bun "$SCRIPT_DIR/codex-peer.ts" >/tmp/codex-peer-worker-"$ROOM".log 2>&1 &
+
+printf '[bridge-codex-peer] room %s companion Codex starting; background worker active.\n' "$ROOM"
+exec codex -c 'mcp_servers.codex-bridge.enabled=false'

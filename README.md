@@ -142,14 +142,14 @@ Claude-backed room:
 Codex-backed room:
 
 ```bash
-# Terminal 1 — Codex peer worker
+# Terminal 1 — Codex peer companion (background worker starts automatically)
 ./bridge-codex-peer ENG-5678
 
 # Terminal 2 — Primary Codex
 ./bridge-codex ENG-5678
 ```
 
-The wrappers register the room with the bridge server via `POST /api/rooms/:roomId`, receive a session token, write it to `/tmp/*-bridge-room-$$` in `roomId:token` format, and exec the respective runtime. The bridge processes then authenticate every request with this token via the `x-bridge-token` header.
+The wrappers register the room with the bridge server via `POST /api/rooms/:roomId`, receive a session token, write it to `/tmp/*-bridge-room-$$` in `roomId:token` format, and exec the respective runtime. In Codex-backed rooms, `bridge-codex-peer` opens a foreground Codex companion session while a background worker handles bridge execution. The bridge processes then authenticate every request with this token via the `x-bridge-token` header.
 
 For environments where the wrapper can't be used (e.g., custom MCP launchers), obtain a token manually:
 
