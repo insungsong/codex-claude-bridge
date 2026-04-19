@@ -10,14 +10,17 @@
  * covering-bridge.ts uses GET /api/rooms to show room status.
  */
 
-import { writeFileSync, mkdirSync } from 'fs'
-import { readFileSync } from 'fs'
+import { writeFileSync, mkdirSync, readFileSync, renameSync, existsSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, extname } from 'path'
 import { randomBytes } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
 const PORT = Number(process.env.CODEX_BRIDGE_PORT ?? 8788)
+const STATE_FILE = process.env.CODEX_BRIDGE_STATE_FILE ?? '/tmp/codex-bridge-state.json'
+const PERSIST_VERSION = 1
+const STALE_CUTOFF_MS = 60 * 60 * 1000  // 1 hour
+const PERSIST_DEBOUNCE_MS = 500
 const STATE_DIR = join(homedir(), '.claude', 'channels', 'codex-bridge')
 const FILES_DIR = join(STATE_DIR, 'files')
 
@@ -82,6 +85,28 @@ type RoomState = {
   clients: Set<ServerWebSocket<unknown>>
 }
 
+type SerializedPendingReply = {
+  msgId: string
+  createdAt: number
+  normalizedMessage?: string
+  reply?: string
+}
+
+type SerializedRoom = {
+  id: string
+  createdAt: number
+  sessionToken: string
+  lastActivity: number
+  pendingForCodex: { id: string; text: string }[]
+  pendingReplies: SerializedPendingReply[]
+}
+
+type PersistedState = {
+  version: number
+  savedAt: number
+  rooms: SerializedRoom[]
+}
+
 function isClaudeConnected(room: RoomState) {
   return room.claudeLastSeen > 0 && (Date.now() - room.claudeLastSeen) < HEARTBEAT_TIMEOUT_MS
 }
@@ -93,6 +118,7 @@ function isCodexConnected(room: RoomState) {
 // ── Room registry ──
 
 const rooms = new Map<string, RoomState>()
+loadState()
 
 // Tombstone: roomIds deleted within the last 10s. Prevents zombie MCP processes from
 // instantly reviving a room after [c] closes it. Expires automatically after 10s,
@@ -124,12 +150,118 @@ function getOrCreateRoom(roomId: string): RoomState {
       clients: new Set(),
     })
     process.stderr.write(`[bridge] room created: ${roomId}\n`)
+    schedulePersist()
   }
   return rooms.get(roomId)!
 }
 
 function touchRoom(room: RoomState) {
   room.lastActivity = Date.now()
+}
+
+// ── Persistence ──
+
+function serializeRoom(room: RoomState): SerializedRoom {
+  const serializedReplies: SerializedPendingReply[] = []
+  for (const [msgId, pending] of room.pendingReplies) {
+    serializedReplies.push({
+      msgId,
+      createdAt: pending.createdAt,
+      normalizedMessage: pending.normalizedMessage,
+      reply: pending.reply,
+    })
+  }
+  return {
+    id: room.id,
+    createdAt: room.createdAt,
+    sessionToken: room.sessionToken,
+    lastActivity: room.lastActivity,
+    pendingForCodex: [...room.pendingForCodex],
+    pendingReplies: serializedReplies,
+  }
+}
+
+let persistTimer: Timer | null = null
+
+function persistState(): void {
+  persistTimer = null
+  try {
+    const state: PersistedState = {
+      version: PERSIST_VERSION,
+      savedAt: Date.now(),
+      rooms: Array.from(rooms.values()).map(serializeRoom),
+    }
+    writeFileSync(STATE_FILE, JSON.stringify(state), 'utf8')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[bridge] persist failed: ${msg}\n`)
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer !== null) return
+  persistTimer = setTimeout(persistState, PERSIST_DEBOUNCE_MS)
+}
+
+function loadState(): void {
+  if (!existsSync(STATE_FILE)) return
+  let raw: string
+  try {
+    raw = readFileSync(STATE_FILE, 'utf8')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[bridge] state read failed: ${msg}\n`)
+    return
+  }
+  let parsed: PersistedState
+  try {
+    parsed = JSON.parse(raw) as PersistedState
+  } catch {
+    const corruptPath = `${STATE_FILE}.corrupted-${Date.now()}`
+    try { renameSync(STATE_FILE, corruptPath) } catch {}
+    process.stderr.write(`[bridge] state file corrupt; moved to ${corruptPath}\n`)
+    return
+  }
+  if (parsed.version !== PERSIST_VERSION) {
+    process.stderr.write(`[bridge] state version ${parsed.version} != ${PERSIST_VERSION}, skipping\n`)
+    return
+  }
+  const now = Date.now()
+  let restored = 0
+  let skipped = 0
+  for (const sr of parsed.rooms) {
+    if (now - sr.lastActivity > STALE_CUTOFF_MS) {
+      skipped++
+      continue
+    }
+    const pendingReplies = new Map<string, PendingReply>()
+    for (const sp of sr.pendingReplies) {
+      // Drop entries with no reply — the Codex that was waiting has already timed out.
+      if (sp.reply === undefined) continue
+      pendingReplies.set(sp.msgId, {
+        createdAt: sp.createdAt,
+        normalizedMessage: sp.normalizedMessage,
+        reply: sp.reply,
+        waiters: new Set(),
+      })
+    }
+    rooms.set(sr.id, {
+      id: sr.id,
+      createdAt: sr.createdAt,
+      claudeLastSeen: 0,
+      codexLastSeen: 0,
+      lastActivity: sr.lastActivity,
+      pendingReplies,
+      inFlightCodexMessages: new Map(),
+      pendingForCodex: [...sr.pendingForCodex],
+      pendingForClaude: [],
+      pendingForClaudeWaiters: new Set(),
+      sessionToken: sr.sessionToken,
+      clients: new Set(),
+    })
+    restored++
+  }
+  process.stderr.write(`[bridge] state loaded: ${restored} room(s) restored, ${skipped} stale\n`)
 }
 
 // ── Utilities ──
@@ -170,6 +302,7 @@ function dropPendingReply(room: RoomState, msgId: string) {
   }
   for (const w of pending.waiters) w.cleanup()
   pending.waiters.clear()
+  schedulePersist()
 }
 
 function pruneExpiredPendingReplies(room: RoomState) {
@@ -184,6 +317,7 @@ function resolveCodexReply(room: RoomState, replyToId: string | undefined, text:
   const pending = room.pendingReplies.get(replyToId)
   if (!pending || pending.reply !== undefined) return
   pending.reply = text
+  schedulePersist()
   if (pending.waiters.size > 0) {
     const waiters = Array.from(pending.waiters)
     dropPendingReply(room, replyToId)
@@ -294,6 +428,7 @@ Bun.serve({
       }
       rooms.delete(roomId)
       markDeleted(roomId)  // tombstone: block auto-create for 10s
+      schedulePersist()
       process.stderr.write(`[bridge] room closed: ${roomId}\n`)
       return new Response(null, { status: 204 })
     }
@@ -417,6 +552,7 @@ Bun.serve({
         broadcast(room, { type: 'msg', id, from: 'claude', text, ts: Date.now(), replyTo })
         if (proactive) {
           room.pendingForCodex.push({ id, text })
+          schedulePersist()
         } else {
           resolveCodexReply(room, replyTo, text)
         }
@@ -454,6 +590,7 @@ Bun.serve({
           waiters: new Set(),
         })
         room.inFlightCodexMessages.set(normalized, id)
+        schedulePersist()
 
         deliverMessageToClaude(room, id, message, 'codex')
         broadcast(room, { type: 'msg', id, from: 'codex', text: message, ts: Date.now() })

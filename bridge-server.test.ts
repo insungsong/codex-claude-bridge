@@ -1,6 +1,19 @@
 // bridge-server.test.ts
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import type { Subprocess } from 'bun'
+import { unlinkSync, existsSync, writeFileSync } from 'fs'
+
+function spawnServerWithState(statePath: string, port: number) {
+  return Bun.spawn(['bun', 'bridge-server.ts'], {
+    env: {
+      ...process.env,
+      CODEX_BRIDGE_PORT: String(port),
+      CODEX_BRIDGE_STATE_FILE: statePath,
+    },
+    stdout: 'ignore',
+    stderr: 'ignore',
+  })
+}
 
 let server: Subprocess | null = null
 let PORT = 0
@@ -22,7 +35,11 @@ beforeAll(async () => {
   PORT = 20000 + Math.floor(Math.random() * 40000)
   BASE = `http://127.0.0.1:${PORT}`
   server = Bun.spawn(['bun', 'bridge-server.ts'], {
-    env: { ...process.env, CODEX_BRIDGE_PORT: String(PORT) },
+    env: {
+      ...process.env,
+      CODEX_BRIDGE_PORT: String(PORT),
+      CODEX_BRIDGE_STATE_FILE: `/tmp/codex-bridge-state-test-${PORT}.json`,  // ← new
+    },
     stdout: 'ignore',
     stderr: 'ignore',
   })
@@ -37,6 +54,7 @@ beforeAll(async () => {
 afterAll(async () => {
   server?.kill()
   await server?.exited
+  try { unlinkSync(`/tmp/codex-bridge-state-test-${PORT}.json`) } catch {}
 })
 
 describe('session token', () => {
@@ -124,4 +142,131 @@ describe('session token', () => {
     const r = await fetch(`${BASE}/api/rooms`)
     expect(r.status).toBe(200)
   })
+})
+
+describe('state persistence', () => {
+  test('token persists across server restart', async () => {
+    const statePath = `/tmp/codex-bridge-state-persist-test-${Date.now()}.json`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s1 = spawnServerWithState(statePath, port)
+    await waitForHealth(base)
+    const create = await fetch(`${base}/api/rooms/PERSIST-A`, { method: 'POST' })
+    const { sessionToken } = await create.json() as { sessionToken: string }
+
+    // Trigger the debounced persist — wait > 500ms
+    await Bun.sleep(700)
+
+    s1.kill()
+    await s1.exited
+
+    // Boot a fresh server pointing at the same state file
+    const s2 = spawnServerWithState(statePath, port)
+    try {
+      await waitForHealth(base)
+      const heartbeat = await fetch(`${base}/api/rooms/PERSIST-A/codex/heartbeat`, {
+        method: 'POST',
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      expect(heartbeat.status).toBe(204)
+    } finally {
+      s2.kill()
+      await s2.exited
+      try { unlinkSync(statePath) } catch {}
+    }
+  }, 15000)
+
+  test('stale rooms (>1h lastActivity) are skipped on load', async () => {
+    const statePath = `/tmp/codex-bridge-state-stale-test-${Date.now()}.json`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    // Hand-write a state file with lastActivity = 2 hours ago
+    const ancientState = {
+      version: 1,
+      savedAt: Date.now(),
+      rooms: [{
+        id: 'ANCIENT',
+        createdAt: Date.now() - 7200_000,
+        sessionToken: '0'.repeat(32),
+        lastActivity: Date.now() - 7200_000,
+        pendingForCodex: [],
+        pendingReplies: [],
+      }],
+    }
+    writeFileSync(statePath, JSON.stringify(ancientState), 'utf8')
+
+    const s = spawnServerWithState(statePath, port)
+    try {
+      await waitForHealth(base)
+      const list = await fetch(`${base}/api/rooms`)
+      const rooms = await list.json() as { id: string }[]
+      expect(rooms.find(r => r.id === 'ANCIENT')).toBeUndefined()
+    } finally {
+      s.kill()
+      await s.exited
+      try { unlinkSync(statePath) } catch {}
+    }
+  }, 10000)
+
+  test('corrupted state file is quarantined, server starts clean', async () => {
+    const statePath = `/tmp/codex-bridge-state-corrupt-test-${Date.now()}.json`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    writeFileSync(statePath, '{ this is not json', 'utf8')
+
+    const s = spawnServerWithState(statePath, port)
+    try {
+      await waitForHealth(base)
+      // Server should start despite corrupt file
+      const health = await fetch(`${base}/api/health`)
+      expect(health.status).toBe(200)
+      // Original file should have been renamed to `.corrupted-<ts>`
+      expect(existsSync(statePath)).toBe(false)
+    } finally {
+      s.kill()
+      await s.exited
+      // Cleanup any .corrupted-* files (best-effort)
+    }
+  }, 10000)
+
+  test('pendingForCodex queue persists and is drained after restart', async () => {
+    const statePath = `/tmp/codex-bridge-state-queue-test-${Date.now()}.json`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s1 = spawnServerWithState(statePath, port)
+    await waitForHealth(base)
+    const create = await fetch(`${base}/api/rooms/QUEUE`, { method: 'POST' })
+    const { sessionToken } = await create.json() as { sessionToken: string }
+
+    // Claude-side proactive message → into pendingForCodex
+    await fetch(`${base}/api/rooms/QUEUE/from-claude`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+      body: JSON.stringify({ text: 'hello from claude', proactive: true }),
+    })
+
+    await Bun.sleep(700)
+    s1.kill()
+    await s1.exited
+
+    const s2 = spawnServerWithState(statePath, port)
+    try {
+      await waitForHealth(base)
+      const drain = await fetch(`${base}/api/rooms/QUEUE/pending-for-codex`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      expect(drain.status).toBe(200)
+      const { messages } = await drain.json() as { messages: { text: string }[] }
+      expect(messages.length).toBeGreaterThan(0)
+      expect(messages.some(m => m.text === 'hello from claude')).toBe(true)
+    } finally {
+      s2.kill()
+      await s2.exited
+      try { unlinkSync(statePath) } catch {}
+    }
+  }, 15000)
 })
