@@ -237,6 +237,7 @@ Legacy `server.ts` is kept for reference — it combined the HTTP server and Cla
 | `CODEX_BRIDGE_ROOM` | *(required)* | Room ID — use your ticket number e.g. `ENG-1234` |
 | `CODEX_BRIDGE_URL` | `http://localhost:8788` | Bridge server URL |
 | `CODEX_BRIDGE_PORT` | `8788` | Bridge server port |
+| `CODEX_BRIDGE_STATE_FILE` | `/tmp/codex-bridge-state.json` | Path to the JSON persistence file. Set to any path under `/dev/null` to effectively disable persistence (writes will fail silently) |
 
 ---
 
@@ -274,7 +275,7 @@ Each room has its own isolated state: pending replies, in-flight deduplication, 
 - Both agents must be on the same machine (localhost bridge).
 - `--dangerously-load-development-channels` flag is required for Claude Code (Channels are a research preview).
 - Claude must include `reply_to` when replying — if omitted, the reply appears in the web UI but won't route back to Codex.
-- Session tokens are in-memory only: restarting `bridge-server` invalidates all tokens issued before the restart. Running MCP processes will exit on next heartbeat (401 or 404), and wrapper scripts need to be re-run to obtain new tokens.
+- State persistence is best-effort with up to ~500ms of message loss on crash: state writes are debounced 500ms after each mutation, so a crash within that window drops the most recent proactive message or reply. Tokens, rooms, and queues are restored on next boot — running MCP processes continue working across graceful restarts. Rooms with `lastActivity` older than 1 hour are skipped on load. Corrupted state files are moved aside to `${STATE_FILE}.corrupted-<timestamp>` and the server starts clean.
 - Reopening a room within the 10-second tombstone window: the wrapper will successfully fetch a new token (`POST /api/rooms/:roomId` stays open for issuance), but the spawned MCP's first heartbeat will hit the tombstone and return 404, causing the MCP to exit immediately. Wait 10 seconds after closing a room before rerunning the wrapper.
 
 ---
