@@ -151,6 +151,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: [
         `Send a message to Claude Code through Codex Bridge (room: ${ROOM_ID}) and wait for a reply.`,
         'This tool blocks until Claude responds (up to about 2 minutes).',
+        'For tiny relays or short pings, send the real non-empty message directly instead of doing unrelated preflight checks first.',
         'Use this to collaborate with Claude: ask questions, propose approaches,',
         'debate architecture decisions, or reach consensus on implementation details.',
         '',
@@ -173,6 +174,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: [
         'Check if Claude has sent any proactive messages in this room.',
         'Returns pending messages from Claude that you have not seen yet.',
+        'Use this after a real handoff or when explicitly checking pending proactive messages.',
+        'Do not use it as a preflight step before the first non-empty send_to_claude call.',
       ].join(' '),
       inputSchema: { type: 'object', properties: {} },
     },

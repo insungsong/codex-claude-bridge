@@ -235,6 +235,15 @@ Keep going until you reach a decision.
 Codex calls `send_to_claude()` → bridge pushes to Claude → Claude replies → bridge returns to Codex.  
 Codex keeps calling `send_to_claude()` until consensus is reached.
 
+For tiny relays, use the same rule with less ceremony:
+
+```
+Use send_to_claude with the exact non-empty message "ㅎㅇ".
+Do not run unrelated preflight checks first.
+```
+
+If you need to inspect pending Claude-side proactive messages, use `check_claude_messages()` only after a real handoff has already happened, or when you are explicitly checking the pending queue. It is not a "ping the bridge before first send" step.
+
 ---
 
 ## Files
