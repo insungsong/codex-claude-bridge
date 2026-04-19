@@ -1,21 +1,25 @@
 // bridge-server.test.ts
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
-import type { Subprocess } from 'bun'
+import { spawn, type ChildProcess } from 'child_process'
 import { unlinkSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 function spawnServerWithState(statePath: string, port: number) {
-  return Bun.spawn(['bun', 'bridge-server.ts'], {
+  return spawn('bun', ['bridge-server.ts'], {
+    cwd: process.cwd(),
     env: {
       ...process.env,
       CODEX_BRIDGE_PORT: String(port),
       CODEX_BRIDGE_STATE_FILE: statePath,
     },
-    stdout: 'ignore',
-    stderr: 'ignore',
+    stdio: 'ignore',
   })
 }
 
-let server: Subprocess | null = null
+function waitForExit(proc: ChildProcess | ReturnType<typeof spawnServerWithState>) {
+  return new Promise<number | null>(resolve => proc.once('exit', code => resolve(code)))
+}
+
+let server: ReturnType<typeof spawnServerWithState> | null = null
 let PORT = 0
 let BASE = ''
 
@@ -34,14 +38,14 @@ async function waitForHealth(base: string, timeoutMs = 3000): Promise<void> {
 beforeAll(async () => {
   PORT = 20000 + Math.floor(Math.random() * 40000)
   BASE = `http://127.0.0.1:${PORT}`
-  server = Bun.spawn(['bun', 'bridge-server.ts'], {
+  server = spawn('bun', ['bridge-server.ts'], {
+    cwd: process.cwd(),
     env: {
       ...process.env,
       CODEX_BRIDGE_PORT: String(PORT),
-      CODEX_BRIDGE_STATE_FILE: `/tmp/codex-bridge-state-test-${PORT}.json`,  // ← new
+      CODEX_BRIDGE_STATE_FILE: `/tmp/codex-bridge-state-test-${PORT}.json`,
     },
-    stdout: 'ignore',
-    stderr: 'ignore',
+    stdio: 'ignore',
   })
   try {
     await waitForHealth(BASE)
@@ -53,7 +57,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   server?.kill()
-  await server?.exited
+  if (server) await waitForExit(server)
   try { unlinkSync(`/tmp/codex-bridge-state-test-${PORT}.json`) } catch {}
 })
 
@@ -159,7 +163,7 @@ describe('state persistence', () => {
     await Bun.sleep(700)
 
     s1.kill()
-    await s1.exited
+    await waitForExit(s1)
 
     // Boot a fresh server pointing at the same state file
     const s2 = spawnServerWithState(statePath, port)
@@ -172,7 +176,7 @@ describe('state persistence', () => {
       expect(heartbeat.status).toBe(204)
     } finally {
       s2.kill()
-      await s2.exited
+      await waitForExit(s2)
       try { unlinkSync(statePath) } catch {}
     }
   }, 15000)
@@ -205,7 +209,7 @@ describe('state persistence', () => {
       expect(rooms.find(r => r.id === 'ANCIENT')).toBeUndefined()
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       try { unlinkSync(statePath) } catch {}
     }
   }, 10000)
@@ -227,7 +231,7 @@ describe('state persistence', () => {
       expect(existsSync(statePath)).toBe(false)
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       // Cleanup any .corrupted-* files (best-effort)
     }
   }, 10000)
@@ -251,7 +255,7 @@ describe('state persistence', () => {
 
     await Bun.sleep(700)
     s1.kill()
-    await s1.exited
+    await waitForExit(s1)
 
     const s2 = spawnServerWithState(statePath, port)
     try {
@@ -265,7 +269,7 @@ describe('state persistence', () => {
       expect(messages.some(m => m.text === 'hello from claude')).toBe(true)
     } finally {
       s2.kill()
-      await s2.exited
+      await waitForExit(s2)
       try { unlinkSync(statePath) } catch {}
     }
   }, 15000)
@@ -277,15 +281,15 @@ describe('message history log', () => {
     const base = `http://127.0.0.1:${port}`
     const roomId = `LOG-TEST-${Date.now()}`
 
-    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+    const s = spawn('bun', ['bridge-server.ts'], {
+      cwd: process.cwd(),
       env: {
         ...process.env,
         CODEX_BRIDGE_PORT: String(port),
         CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-test-state-${port}.json`,
         // CODEX_BRIDGE_LOG_DIR unset -> defaults to /tmp
       },
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdio: 'ignore',
     })
     try {
       await waitForHealth(base)
@@ -313,7 +317,7 @@ describe('message history log', () => {
       expect(codexLine.sender).toBe('codex')
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
       try { unlinkSync(`/tmp/bridge-log-test-state-${port}.json`) } catch {}
     }
@@ -324,14 +328,14 @@ describe('message history log', () => {
     const port = 30000 + Math.floor(Math.random() * 20000)
     const base = `http://127.0.0.1:${port}`
 
-    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+    const s = spawn('bun', ['bridge-server.ts'], {
+      cwd: process.cwd(),
       env: {
         ...process.env,
         CODEX_BRIDGE_PORT: String(port),
         CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-claude-state-${port}.json`,
       },
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdio: 'ignore',
     })
     try {
       await waitForHealth(base)
@@ -361,28 +365,112 @@ describe('message history log', () => {
       expect(lines.some((l: { kind: string }) => l.kind === 'claude→codex:reply')).toBe(true)
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
       try { unlinkSync(`/tmp/bridge-log-claude-state-${port}.json`) } catch {}
+    }
+  }, 15000)
+
+  test('codex-backed assistant rooms log codex-peer kinds through the assistant lane', async () => {
+    const roomId = `LOG-CODEX-PEER-${Date.now()}`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s = spawn('bun', ['bridge-server.ts'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_PORT: String(port),
+        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-codex-peer-state-${port}.json`,
+      },
+      stdio: 'ignore',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assistantType: 'codex' }),
+      })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      await fetch(`${base}/api/rooms/${roomId}/from-codex`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ message: 'hello codex peer' }),
+      })
+
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ text: 'peer proactive', proactive: true }),
+      })
+
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ text: 'peer reply', proactive: false }),
+      })
+
+      await Bun.sleep(100)
+
+      const logPath = `/tmp/bridge-${roomId}.jsonl`
+      expect(existsSync(logPath)).toBe(true)
+      const lines = readFileSync(logPath, 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      expect(lines.some((l: { kind: string }) => l.kind === 'codex→codex-peer')).toBe(true)
+      expect(lines.some((l: { kind: string }) => l.kind === 'codex-peer→codex:proactive')).toBe(true)
+      expect(lines.some((l: { kind: string }) => l.kind === 'codex-peer→codex:reply')).toBe(true)
+    } finally {
+      s.kill()
+      await waitForExit(s)
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+      try { unlinkSync(`/tmp/bridge-log-codex-peer-state-${port}.json`) } catch {}
     }
   }, 15000)
 })
 
 describe('bridge core correctness', () => {
+  test('rooms can be pre-created with a codex assistant type', async () => {
+    const roomId = `ROOM-TYPE-${Date.now()}`
+
+    const create = await fetch(`${BASE}/api/rooms/${roomId}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ assistantType: 'codex' }),
+    })
+    expect(create.status).toBe(201)
+
+    const list = await fetch(`${BASE}/api/rooms`)
+    expect(list.status).toBe(200)
+    const rooms = await list.json() as Array<{
+      id: string
+      assistantType?: string
+      assistantConnected?: boolean
+      claudeConnected: boolean
+      codexConnected: boolean
+    }>
+    const room = rooms.find(entry => entry.id === roomId)
+    expect(room).toBeDefined()
+    expect(room?.assistantType).toBe('codex')
+    expect(room?.assistantConnected).toBe(false)
+    expect(room?.claudeConnected).toBe(false)
+    expect(room?.codexConnected).toBe(false)
+  })
+
   test('long-poll round trip: codex → pending-for-claude → from-claude reply → codex poll resolves', async () => {
     const roomId = `LP-${Date.now()}`
     const port = 30000 + Math.floor(Math.random() * 20000)
     const base = `http://127.0.0.1:${port}`
 
-    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+    const s = spawn('bun', ['bridge-server.ts'], {
+      cwd: process.cwd(),
       env: {
         ...process.env,
         CODEX_BRIDGE_PORT: String(port),
         CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-core-state-${port}.json`,
         CODEX_BRIDGE_LOG_DIR: `/tmp`,
       },
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdio: 'ignore',
     })
     try {
       await waitForHealth(base)
@@ -429,7 +517,7 @@ describe('bridge core correctness', () => {
       expect(pollBody.reply).toBe('claude answer')
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       try { unlinkSync(`/tmp/bridge-core-state-${port}.json`) } catch {}
       try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
     }
@@ -440,15 +528,15 @@ describe('bridge core correctness', () => {
     const port = 30000 + Math.floor(Math.random() * 20000)
     const base = `http://127.0.0.1:${port}`
 
-    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+    const s = spawn('bun', ['bridge-server.ts'], {
+      cwd: process.cwd(),
       env: {
         ...process.env,
         CODEX_BRIDGE_PORT: String(port),
         CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-dedup-state-${port}.json`,
         CODEX_BRIDGE_LOG_DIR: `/tmp`,
       },
-      stdout: 'ignore',
-      stderr: 'ignore',
+      stdio: 'ignore',
     })
     try {
       await waitForHealth(base)
@@ -475,7 +563,7 @@ describe('bridge core correctness', () => {
       expect(matching.length).toBe(1)
     } finally {
       s.kill()
-      await s.exited
+      await waitForExit(s)
       try { unlinkSync(`/tmp/bridge-dedup-state-${port}.json`) } catch {}
       try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
     }

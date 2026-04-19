@@ -1,6 +1,6 @@
 import { readdirSync, readFileSync, unlinkSync } from 'fs'
 
-export type BridgeAgent = 'claude' | 'codex'
+export type BridgeAgent = 'claude' | 'codex' | 'codex-peer'
 
 export type BridgeSession = {
   agent: BridgeAgent
@@ -9,7 +9,7 @@ export type BridgeSession = {
   roomId: string
 }
 
-export type TerminalSessions = Map<string, { claude: number[]; codex: number[] }>
+export type TerminalSessions = Map<string, { claude: number[]; codex: number[]; codexPeer: number[] }>
 
 type Signal = NodeJS.Signals | 0
 
@@ -44,7 +44,7 @@ function parseSession(
   file: string,
   deps: RoomTerminalDeps,
 ): BridgeSession | null {
-  const match = file.match(/^(claude|codex)-bridge-room-(\d+)$/)
+  const match = file.match(/^(claude|codex|codex-peer)-bridge-room-(\d+)$/)
   if (!match) return null
 
   const [, agent, rawPid] = match
@@ -103,9 +103,14 @@ export function getTerminalSessions(overrides: Partial<RoomTerminalDeps> = {}): 
 
   for (const session of listBridgeSessions(overrides)) {
     if (!sessions.has(session.roomId)) {
-      sessions.set(session.roomId, { claude: [], codex: [] })
+      sessions.set(session.roomId, { claude: [], codex: [], codexPeer: [] })
     }
-    sessions.get(session.roomId)![session.agent].push(session.pid)
+    const bucket = sessions.get(session.roomId)!
+    if (session.agent === 'codex-peer') {
+      bucket.codexPeer.push(session.pid)
+    } else {
+      bucket[session.agent].push(session.pid)
+    }
   }
 
   return sessions

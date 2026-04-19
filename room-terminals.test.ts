@@ -39,17 +39,18 @@ describe('room terminals', () => {
     const files = {
       'claude-bridge-room-101': 'ENG-2405',
       'codex-bridge-room-202': 'ENG-2405:token',
+      'codex-peer-bridge-room-204': 'ENG-2405:token',
       'claude-bridge-room-303': 'ENG-2436',
       'not-a-room-file': 'ignore-me',
     }
     const deps = createDeps({
       files,
-      alivePids: new Set([101, 202]),
+      alivePids: new Set([101, 202, 204]),
     })
 
     const sessions = getTerminalSessions(deps)
 
-    expect(sessions.get('ENG-2405')).toEqual({ claude: [101], codex: [202] })
+    expect(sessions.get('ENG-2405')).toEqual({ claude: [101], codex: [202], codexPeer: [204] })
     expect(sessions.has('ENG-2436')).toBe(false)
   })
 
@@ -57,9 +58,10 @@ describe('room terminals', () => {
     const files = {
       'claude-bridge-room-101': 'ENG-2405',
       'codex-bridge-room-202': 'ENG-2405',
+      'codex-peer-bridge-room-204': 'ENG-2405',
       'claude-bridge-room-303': 'ENG-2436',
     }
-    const alivePids = new Set([101, 202, 303])
+    const alivePids = new Set([101, 202, 204, 303])
     const kills: Array<[number, NodeJS.Signals | 0 | undefined]> = []
     const deps = createDeps({
       files,
@@ -68,6 +70,7 @@ describe('room terminals', () => {
         kills.push([pid, signal])
         if (pid === 101 && signal === 'SIGTERM') alivePids.delete(pid)
         if (pid === 202 && signal === 'SIGKILL') alivePids.delete(pid)
+        if (pid === 204 && signal === 'SIGTERM') alivePids.delete(pid)
       },
     })
 
@@ -76,16 +79,18 @@ describe('room terminals', () => {
     expect(kills).toEqual([
       [101, 'SIGTERM'],
       [202, 'SIGTERM'],
+      [204, 'SIGTERM'],
       [202, 'SIGKILL'],
     ])
     expect(summary).toEqual({
       roomId: 'ENG-2405',
-      matched: 2,
-      terminated: [101],
+      matched: 3,
+      terminated: [101, 204],
       forced: [202],
       cleanedPidFiles: [
         '/tmp/claude-bridge-room-101',
         '/tmp/codex-bridge-room-202',
+        '/tmp/codex-peer-bridge-room-204',
       ],
       failures: [],
     })

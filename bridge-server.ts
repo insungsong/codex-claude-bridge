@@ -3,9 +3,10 @@
  * Codex Bridge — Central HTTP server for multi-room support.
  *
  * Manages multiple isolated rooms (identified by ticket number e.g. ENG-1234).
- * Each room has its own Codex ↔ Claude message channel.
+ * Each room has its own Codex ↔ assistant message channel.
  *
- * claude-mcp.ts connects here per room to relay messages to/from Claude.
+ * claude-mcp.ts or codex-peer.ts connects here per room to relay messages to/from
+ * the assistant slot.
  * codex-mcp.ts connects here per room to relay messages to/from Codex.
  * covering-bridge.ts uses GET /api/rooms to show room status.
  */
@@ -41,9 +42,11 @@ const FILES_DIR = join(STATE_DIR, 'files')
 
 // ── Types ──
 
+type AssistantType = 'claude' | 'codex'
+
 type Msg = {
   id: string
-  from: 'claude' | 'codex' | 'user'
+  from: 'assistant' | 'codex' | 'user'
   text: string
   ts: number
   replyTo?: string
@@ -81,10 +84,11 @@ const HEARTBEAT_TIMEOUT_MS = 3000  // 3× the 1s heartbeat interval
 type RoomState = {
   id: string
   createdAt: number
+  assistantType: AssistantType
   // Session token — generated on room creation, written into PID files by covering-bridge.
   // MCP processes must echo it in every heartbeat. Stale processes (wrong/no token) get 404.
-  // Liveness: updated by claude-mcp's pending-for-claude poll and codex-mcp's heartbeat.
-  // claudeConnected/codexConnected are computed dynamically — not stored as booleans.
+  // Liveness: updated by the assistant lane's pending-for-claude poll and codex-mcp's heartbeat.
+  // assistantConnected/codexConnected are computed dynamically — not stored as booleans.
   claudeLastSeen: number
   codexLastSeen: number
   lastActivity: number
@@ -112,6 +116,7 @@ type SerializedPendingReply = {
 type SerializedRoom = {
   id: string
   createdAt: number
+  assistantType?: AssistantType
   sessionToken: string
   lastActivity: number
   pendingForCodex: { id: string; text: string }[]
@@ -128,8 +133,49 @@ function isClaudeConnected(room: RoomState) {
   return room.claudeLastSeen > 0 && (Date.now() - room.claudeLastSeen) < HEARTBEAT_TIMEOUT_MS
 }
 
+function isAssistantConnected(room: RoomState) {
+  return isClaudeConnected(room)
+}
+
 function isCodexConnected(room: RoomState) {
   return room.codexLastSeen > 0 && (Date.now() - room.codexLastSeen) < HEARTBEAT_TIMEOUT_MS
+}
+
+function assistantLaneLabel(room: Pick<RoomState, 'assistantType'>) {
+  return room.assistantType === 'codex' ? 'codex-peer' : 'claude'
+}
+
+function parseAssistantType(value: unknown): AssistantType | null {
+  if (value === undefined) return 'claude'
+  if (value === 'claude' || value === 'codex') return value
+  return null
+}
+
+type AssistantTypeRequest = {
+  assistantType: AssistantType
+  explicit: boolean
+}
+
+async function readAssistantTypeFromRequest(req: Request): Promise<AssistantTypeRequest | null> {
+  const raw = await req.text()
+  if (!raw.trim()) {
+    return {
+      assistantType: 'claude',
+      explicit: false,
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as { assistantType?: unknown }
+    const assistantType = parseAssistantType(parsed.assistantType)
+    if (!assistantType) return null
+    return {
+      assistantType,
+      explicit: parsed.assistantType !== undefined,
+    }
+  } catch {
+    return null
+  }
 }
 
 // ── Room registry ──
@@ -150,11 +196,12 @@ function isTombstoned(roomId: string) {
   return ts !== undefined && Date.now() - ts < 10000
 }
 
-function getOrCreateRoom(roomId: string): RoomState {
+function getOrCreateRoom(roomId: string, assistantType: AssistantType = 'claude'): RoomState {
   if (!rooms.has(roomId)) {
     rooms.set(roomId, {
       id: roomId,
       createdAt: Date.now(),
+      assistantType,
       claudeLastSeen: 0,
       codexLastSeen: 0,
       lastActivity: Date.now(),
@@ -192,6 +239,7 @@ function serializeRoom(room: RoomState): SerializedRoom {
   return {
     id: room.id,
     createdAt: room.createdAt,
+    assistantType: room.assistantType,
     sessionToken: room.sessionToken,
     lastActivity: room.lastActivity,
     pendingForCodex: [...room.pendingForCodex],
@@ -269,6 +317,7 @@ function loadState(): void {
     rooms.set(sr.id, {
       id: sr.id,
       createdAt: sr.createdAt,
+      assistantType: sr.assistantType ?? 'claude',
       claudeLastSeen: 0,
       codexLastSeen: 0,
       lastActivity: sr.lastActivity,
@@ -443,7 +492,7 @@ function checkToken(req: Request, room: RoomState): Response | null {
 Bun.serve({
   port: PORT,
   hostname: '127.0.0.1',
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url)
     const path = url.pathname
 
@@ -476,7 +525,9 @@ Bun.serve({
       const list = Array.from(rooms.values()).map(r => ({
         id: r.id,
         createdAt: r.createdAt,
-        claudeConnected: isClaudeConnected(r),
+        assistantType: r.assistantType,
+        assistantConnected: isAssistantConnected(r),
+        claudeConnected: r.assistantType === 'claude' && isAssistantConnected(r),
         codexConnected: isCodexConnected(r),
         lastActivity: r.lastActivity,
       }))
@@ -488,9 +539,24 @@ Bun.serve({
     const closeMatch = path.match(/^\/api\/rooms\/([^/]+)$/)
     if (closeMatch && req.method === 'POST') {
       const roomId = decodeURIComponent(closeMatch[1])
+      const assistantRequest = await readAssistantTypeFromRequest(req)
+      if (!assistantRequest) {
+        return Response.json({ error: 'assistantType must be "claude" or "codex"' }, { status: 400 })
+      }
       const had = rooms.has(roomId)
-      const room = getOrCreateRoom(roomId)
-      return Response.json({ sessionToken: room.sessionToken }, { status: had ? 200 : 201 })
+      const room = getOrCreateRoom(roomId, assistantRequest.assistantType)
+      if (had && assistantRequest.explicit && room.assistantType !== assistantRequest.assistantType) {
+        room.assistantType = assistantRequest.assistantType
+        touchRoom(room)
+        schedulePersist()
+      }
+      return Response.json(
+        {
+          sessionToken: room.sessionToken,
+          assistantType: room.assistantType,
+        },
+        { status: had ? 200 : 201 },
+      )
     }
     if (closeMatch && req.method === 'DELETE') {
       const roomId = decodeURIComponent(closeMatch[1])
@@ -524,7 +590,8 @@ Bun.serve({
     const roomId = decodeURIComponent(roomMatch[1])
     const sub = roomMatch[2]
 
-    // Claude connect — room must exist (legitimate clients POST /api/rooms/:id first)
+    // Assistant connect — room must exist (legitimate clients POST /api/rooms/:id first)
+    // Endpoint name stays Claude-specific for backward compatibility with claude-mcp.ts.
     // Order: isTombstoned → rooms.get+404 → checkToken → business logic
     if (sub === 'claude/connect') {
       if (req.method === 'POST') {
@@ -535,7 +602,7 @@ Bun.serve({
         if (authFail) return authFail
         room.claudeLastSeen = Date.now()
         touchRoom(room)
-        process.stderr.write(`[bridge] claude connected: ${roomId}\n`)
+        process.stderr.write(`[bridge] ${assistantLaneLabel(room)} connected: ${roomId}\n`)
         return new Response(null, { status: 204 })
       }
       if (req.method === 'DELETE') {
@@ -545,7 +612,7 @@ Bun.serve({
         if (authFail) return authFail
         room.claudeLastSeen = 0
         touchRoom(room)
-        process.stderr.write(`[bridge] claude disconnected: ${roomId}\n`)
+        process.stderr.write(`[bridge] ${assistantLaneLabel(room)} disconnected: ${roomId}\n`)
         return new Response(null, { status: 204 })
       }
     }
@@ -574,13 +641,14 @@ Bun.serve({
       }
     }
 
-    // GET /api/rooms/:roomId/pending-for-claude — claude-mcp.ts long-polls
+    // GET /api/rooms/:roomId/pending-for-claude — assistant lane long-polls
+    // Endpoint name stays Claude-specific for backward compatibility.
     if (sub === 'pending-for-claude' && req.method === 'GET') {
       const room = rooms.get(roomId)
       if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
       const authFail = checkToken(req, room)
       if (authFail) return authFail
-      room.claudeLastSeen = Date.now()  // each poll = heartbeat for Claude liveness
+      room.claudeLastSeen = Date.now()  // each poll = heartbeat for assistant-lane liveness
       touchRoom(room)
       const timeout = Number(url.searchParams.get('timeout') ?? 30000)
 
@@ -614,7 +682,8 @@ Bun.serve({
       })
     }
 
-    // POST /api/rooms/:roomId/from-claude — claude-mcp.ts sends reply/proactive
+    // POST /api/rooms/:roomId/from-claude — assistant lane sends reply/proactive
+    // Endpoint name stays Claude-specific for backward compatibility.
     if (sub === 'from-claude' && req.method === 'POST') {
       return (async () => {
         const room = rooms.get(roomId)
@@ -631,19 +700,26 @@ Bun.serve({
 
         const text = validation.text
         const id = nextId('claude-')
-        broadcast(room, { type: 'msg', id, from: 'claude', text, ts: Date.now(), replyTo })
+        broadcast(room, { type: 'msg', id, from: 'assistant', text, ts: Date.now(), replyTo })
         if (proactive) {
           room.pendingForCodex.push({ id, text })
           schedulePersist()
         } else {
           resolveCodexReply(room, replyTo, text)
         }
-        logMessage(roomId, proactive ? 'claude→codex:proactive' : 'claude→codex:reply', id, 'claude', text)
+        const assistantLabel = assistantLaneLabel(room)
+        logMessage(
+          roomId,
+          proactive ? `${assistantLabel}→codex:proactive` : `${assistantLabel}→codex:reply`,
+          id,
+          assistantLabel,
+          text,
+        )
         return Response.json({ id })
       })()
     }
 
-    // POST /api/rooms/:roomId/from-codex — Codex sends to Claude
+    // POST /api/rooms/:roomId/from-codex — Codex sends to the assistant lane
     // rooms.get + 404: prevents phantom room creation on unauthenticated HTTP gate calls
     // (note: /ws/:roomId upgrade path still auto-creates — see upgrade handler)
     if (sub === 'from-codex' && req.method === 'POST') {
@@ -682,7 +758,7 @@ Bun.serve({
 
         deliverMessageToClaude(room, id, message, 'codex')
         broadcast(room, { type: 'msg', id, from: 'codex', text: message, ts: Date.now() })
-        logMessage(roomId, 'codex→claude', id, 'codex', message)
+        logMessage(roomId, `codex→${assistantLaneLabel(room)}`, id, 'codex', message)
         return Response.json({ id })
       })()
     }
@@ -873,8 +949,11 @@ const HTML = `<!doctype html>
   #log { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
   .message { max-width: 78%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
   .message .label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; opacity: 0.8; }
-  .message.claude { align-self: flex-start; background: #1a1528; border: 1px solid #2d2245; border-bottom-left-radius: 4px; }
-  .message.claude .label { color: #b490ff; }
+  .message.assistant { align-self: flex-start; border-bottom-left-radius: 4px; }
+  .message.assistant.claude { background: #1a1528; border: 1px solid #2d2245; }
+  .message.assistant.claude .label { color: #b490ff; }
+  .message.assistant.codex-peer { background: #161b28; border: 1px solid #24314a; }
+  .message.assistant.codex-peer .label { color: #7ec8ff; }
   .message.codex { align-self: flex-end; background: #0d1f1a; border: 1px solid #1a3d30; border-bottom-right-radius: 4px; }
   .message.codex .label { color: #00d4aa; }
   .message.user { align-self: flex-start; background: #1a1a1a; border: 1px solid #2a2a2a; margin-left: 40px; }
@@ -921,21 +1000,34 @@ const roomSelect = document.getElementById('room-select')
 let currentRoom = null
 let ws = null
 let uid = 0
+const roomMeta = new Map()
+
+function roomAssistantClass(roomId) {
+  const assistantType = roomMeta.get(roomId)?.assistantType
+  return assistantType === 'codex' ? 'codex-peer' : 'claude'
+}
+
+function roomAssistantLabel(roomId) {
+  const assistantType = roomMeta.get(roomId)?.assistantType
+  return assistantType === 'codex' ? 'Codex peer' : 'Claude'
+}
 
 async function loadRooms() {
   let data = []
   try { data = await fetch('/api/rooms').then(r => r.json()) } catch { return }
   const prev = roomSelect.value
+  roomMeta.clear()
   while (roomSelect.firstChild) roomSelect.removeChild(roomSelect.firstChild)
   const placeholder = document.createElement('option')
   placeholder.value = ''
   placeholder.textContent = data.length === 0 ? 'no rooms yet' : '— select room —'
   roomSelect.appendChild(placeholder)
   for (const r of data) {
+    roomMeta.set(r.id, { assistantType: r.assistantType || 'claude' })
     const o = document.createElement('option')
     o.value = r.id
-    const both = r.claudeConnected && r.codexConnected
-    const one = r.claudeConnected || r.codexConnected
+    const both = r.assistantConnected && r.codexConnected
+    const one = r.assistantConnected || r.codexConnected
     o.textContent = r.id + (both ? ' \u2713' : one ? ' ~' : ' \u25cb')
     roomSelect.appendChild(o)
   }
@@ -1006,11 +1098,19 @@ text.addEventListener('keydown', e => {
 
 function addMsg(m) {
   const wrap = document.createElement('div')
-  wrap.className = 'message ' + m.from
+  if (m.from === 'assistant') {
+    wrap.className = 'message assistant ' + roomAssistantClass(currentRoom)
+  } else {
+    wrap.className = 'message ' + m.from
+  }
 
   const label = document.createElement('div')
   label.className = 'label'
-  label.textContent = m.from === 'claude' ? 'Claude' : m.from === 'codex' ? 'Codex' : 'You'
+  label.textContent = m.from === 'assistant'
+    ? roomAssistantLabel(currentRoom)
+    : m.from === 'codex'
+      ? 'Codex'
+      : 'You'
   wrap.appendChild(label)
 
   const body = document.createElement('div')

@@ -7,6 +7,7 @@
     "bridge": "bun covering-bridge.ts",
     "server": "bun bridge-server.ts",
     "claude-mcp": "bun claude-mcp.ts",
+    "codex-peer": "bun codex-peer.ts",
     "codex-mcp": "bun codex-mcp.ts",
     "start": "bun install --no-summary && bun bridge-server.ts"
   },

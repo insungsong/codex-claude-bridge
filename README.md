@@ -1,8 +1,8 @@
 # Codex Bridge
 
-### Make Claude Code and OpenAI Codex talk to each other — across multiple rooms.
+### Make Claude Code and OpenAI Codex talk to each other — or run Codex on both sides — across multiple rooms.
 
-Run multiple Codex ↔ Claude pairs simultaneously, each isolated by ticket number.  
+Run multiple Codex ↔ Claude or Codex ↔ Codex-peer pairs simultaneously, each isolated by ticket number.  
 One `covering-bridge` command manages all rooms from a single terminal.
 
 ![Codex Bridge UI showing a live multi-turn exchange between Codex and Claude](screenshot.png)
@@ -12,9 +12,9 @@ One `covering-bridge` command manages all rooms from a single terminal.
 ## Overview
 
 ```
-Room ENG-1234:  Codex-A  ↔  Claude-A   (feature A)
-Room ENG-5678:  Codex-B  ↔  Claude-B   (feature B)
-Room ENG-9999:  Codex-C  ↔  Claude-C   (feature C)
+Room ENG-1234:  Codex-A  ↔  Claude-A      (feature A)
+Room ENG-5678:  Codex-B  ↔  Codex-peer-B  (feature B)
+Room ENG-9999:  Codex-C  ↔  Claude-C      (feature C)
 ```
 
 Each room is completely isolated — messages never cross between rooms.  
@@ -47,6 +47,8 @@ bun install
 ## Setup
 
 ### 1. Register Claude-side MCP
+
+This step is required only for Claude-backed rooms.
 
 Add to `~/.mcp.json` (create if missing):
 
@@ -100,14 +102,15 @@ This opens an interactive terminal UI:
 
   > o
   Ticket number (e.g. ENG-1234): ENG-9999
+  Assistant type [claude/codex]: codex
 
   Opening room ENG-9999...
-  ✓ tmux window opened (claude left, codex right)
+  ✓ tmux window opened (codex-peer left, codex right)
 ```
 
 The bridge server starts automatically if not already running.  
 Rooms stay open until you explicitly close them with `[c]`.
-Closing a room from `covering-bridge` also sends `SIGTERM` and a `SIGKILL` fallback to the room's `bridge-claude` / `bridge-codex` processes when they are still running.
+Closing a room from `covering-bridge` also sends `SIGTERM` and a `SIGKILL` fallback to the room's bridge-launched assistant / codex processes when they are still running.
 Use `[t]` when you want to stop bridge-launched terminals without deleting the room itself.
 
 **Terminal support:**
@@ -124,7 +127,9 @@ Start the central server once:
 bun bridge-server.ts
 ```
 
-Then for each room, open two terminals and run the wrapper scripts:
+Then for each room, open two terminals and run the wrapper scripts.
+
+Claude-backed room:
 
 ```bash
 # Terminal 1 — Claude
@@ -134,7 +139,17 @@ Then for each room, open two terminals and run the wrapper scripts:
 ./bridge-codex ENG-1234
 ```
 
-The wrappers register the room with the bridge server via `POST /api/rooms/:roomId`, receive a session token, write it to `/tmp/(claude|codex)-bridge-room-$$` in `roomId:token` format, and exec the respective CLI. The MCP processes then authenticate every request with this token via the `x-bridge-token` header.
+Codex-backed room:
+
+```bash
+# Terminal 1 — Codex peer worker
+./bridge-codex-peer ENG-5678
+
+# Terminal 2 — Primary Codex
+./bridge-codex ENG-5678
+```
+
+The wrappers register the room with the bridge server via `POST /api/rooms/:roomId`, receive a session token, write it to `/tmp/*-bridge-room-$$` in `roomId:token` format, and exec the respective runtime. The bridge processes then authenticate every request with this token via the `x-bridge-token` header.
 
 For environments where the wrapper can't be used (e.g., custom MCP launchers), obtain a token manually:
 
@@ -206,7 +221,9 @@ Log entries have the form:
 {"ts":"2026-04-19T14:12:03.412Z","roomId":"ENG-1234","kind":"codex→claude","id":"m1745-2","sender":"codex","text":"..."}
 ```
 
-Kinds: `codex→claude`, `claude→codex:reply`, `claude→codex:proactive`.
+Kinds:
+- Claude-backed rooms: `codex→claude`, `claude→codex:reply`, `claude→codex:proactive`
+- Codex-backed rooms: `codex→codex-peer`, `codex-peer→codex:reply`, `codex-peer→codex:proactive`
 
 Logs grow unbounded — delete or rotate manually (`rm /tmp/bridge-*.jsonl`).
 
@@ -217,7 +234,8 @@ Logs grow unbounded — delete or rotate manually (`rm /tmp/bridge-*.jsonl`).
 Open [http://localhost:8788](http://localhost:8788) to watch all rooms in real time.
 
 - Use the **room selector** dropdown to switch between active rooms
-- **Purple bubbles** (left) = Claude
+- **Purple bubbles** (left) = Claude-backed assistant
+- **Blue bubbles** (left) = Codex-backed assistant
 - **Green bubbles** (right) = Codex
 - **Gray bubbles** = you (human observer via the text box)
 

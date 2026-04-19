@@ -16,7 +16,9 @@ fi
 BRIDGE_URL="${CODEX_BRIDGE_URL:-http://localhost:8788}"
 
 # 방 생성 + 토큰 획득
-if ! RESP=$(curl -s -f -X POST "$BRIDGE_URL/api/rooms/$ROOM"); then
+if ! RESP=$(curl -s -f -X POST "$BRIDGE_URL/api/rooms/$ROOM" \
+  -H 'content-type: application/json' \
+  -d '{"assistantType":"claude"}'); then
   echo "bridge-claude: failed to reach bridge-server at $BRIDGE_URL" >&2
   exit 1
 fi

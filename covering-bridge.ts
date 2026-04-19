@@ -15,6 +15,8 @@ const VERSION = 'v0.4'
 type Room = {
   id: string
   createdAt: number
+  assistantType?: 'claude' | 'codex'
+  assistantConnected?: boolean
   claudeConnected: boolean
   codexConnected: boolean
   lastActivity: number
@@ -128,6 +130,22 @@ function agentDot(connected: boolean, onColor: string): string {
   return connected ? `${onColor}●${C.reset}` : `${C.gray}○${C.reset}`
 }
 
+function roomAssistantType(room: Room): 'claude' | 'codex' {
+  return room.assistantType === 'codex' ? 'codex' : 'claude'
+}
+
+function roomAssistantConnected(room: Room): boolean {
+  return room.assistantConnected ?? room.claudeConnected
+}
+
+function roomAssistantLabel(room: Room): string {
+  return roomAssistantType(room) === 'codex' ? 'codex-peer' : 'claude'
+}
+
+function roomAssistantColor(room: Room): string {
+  return roomAssistantType(room) === 'codex' ? C.bcyan : C.bpurple
+}
+
 function parseSelection(pick: string, count: number): number[] {
   return [...new Set(
     pick.split(',')
@@ -143,6 +161,7 @@ function getTerminalTargets() {
       roomId,
       claudeCount: sessions.claude.length,
       codexCount: sessions.codex.length,
+      codexPeerCount: sessions.codexPeer.length,
     }))
 }
 
@@ -185,12 +204,14 @@ function printRooms(rooms: Room[]): void {
   } else {
     for (const r of [...rooms].sort((a, b) => a.id.localeCompare(b.id))) {
       const codex  = agentDot(r.codexConnected,  C.bgreen)
-      const claude = agentDot(r.claudeConnected, C.bpurple)
+      const assistant = agentDot(roomAssistantConnected(r), roomAssistantColor(r))
       const codexL  = r.codexConnected  ? `${C.green}codex${C.reset}`  : `${C.gray}codex${C.reset}`
-      const claudeL = r.claudeConnected ? `${C.purple}claude${C.reset}` : `${C.gray}claude${C.reset}`
+      const assistantL = roomAssistantConnected(r)
+        ? `${roomAssistantColor(r)}${roomAssistantLabel(r)}${C.reset}`
+        : `${C.gray}${roomAssistantLabel(r)}${C.reset}`
       const id  = rpad(`${C.bold}${r.id}${C.reset}`, 14)
       const age = formatAge(r.lastActivity)
-      console.log(`  ${id}  ${codex} ${codexL}   ${claude} ${claudeL}   ${age}`)
+      console.log(`  ${id}  ${codex} ${codexL}   ${assistant} ${assistantL}   ${age}`)
     }
   }
   // ── Terminal sessions (dim) ──
@@ -202,6 +223,7 @@ function printRooms(rooms: Room[]): void {
       const parts: string[] = []
       if (s.claude.length > 0) parts.push(`claude ×${s.claude.length}`)
       if (s.codex.length  > 0) parts.push(`codex ×${s.codex.length}`)
+      if (s.codexPeer.length > 0) parts.push(`codex-peer ×${s.codexPeer.length}`)
       const label = parts.length > 0 ? parts.join('   ') : 'no active terminals'
       console.log(`  ${C.dim}${roomId.padEnd(14)}  ${label}${C.reset}`)
     }
@@ -237,13 +259,19 @@ function openWithTmux(roomId: string, cmd1: string, cmd2: string): void {
   spawnSync('tmux', ['select-pane', '-L'])
 }
 
-function openWithAppleScript(app: 'iTerm' | 'Terminal', roomId: string, cmd1: string, cmd2: string): void {
+function openWithAppleScript(
+  app: 'iTerm' | 'Terminal',
+  roomId: string,
+  assistantName: string,
+  cmd1: string,
+  cmd2: string,
+): void {
   const script = app === 'iTerm' ? `
 tell application "iTerm"
   activate
   set t to (create tab with default profile)
   tell current session of t
-    set name to "${roomId} (claude)"
+    set name to "${roomId} (${assistantName})"
     write text "${cmd1}"
   end tell
   set t2 to (create tab with default profile)
@@ -260,13 +288,16 @@ end tell`
   spawnSync('osascript', ['-e', script])
 }
 
-function openRoom(roomId: string): 'auto' | 'manual' {
-  const claudeCmd = `bridge-claude ${roomId}`
+function openRoom(roomId: string, assistantType: 'claude' | 'codex'): 'auto' | 'manual' {
+  const assistantCmd = assistantType === 'codex'
+    ? `bridge-codex-peer ${roomId}`
+    : `bridge-claude ${roomId}`
+  const assistantName = assistantType === 'codex' ? 'codex-peer' : 'claude'
   const codexCmd  = `bridge-codex ${roomId}`
   const env = detectEnv()
-  if (env === 'tmux')     { openWithTmux(roomId, claudeCmd, codexCmd); return 'auto' }
-  if (env === 'iterm2')   { openWithAppleScript('iTerm',    roomId, claudeCmd, codexCmd); return 'auto' }
-  if (env === 'terminal') { openWithAppleScript('Terminal', roomId, claudeCmd, codexCmd); return 'auto' }
+  if (env === 'tmux')     { openWithTmux(roomId, assistantCmd, codexCmd); return 'auto' }
+  if (env === 'iterm2')   { openWithAppleScript('iTerm',    roomId, assistantName, assistantCmd, codexCmd); return 'auto' }
+  if (env === 'terminal') { openWithAppleScript('Terminal', roomId, assistantName, assistantCmd, codexCmd); return 'auto' }
   return 'manual'
 }
 
@@ -308,15 +339,28 @@ async function main(): Promise<void> {
       const ticketRaw = (await prompt(rl, `  ${C.gray}Room ID (e.g. ENG-1234):${C.reset} `)).trim()
       const ticket = ticketRaw.toUpperCase()
       if (!ticket) { console.log(`  ${C.gray}Cancelled.${C.reset}`); continue }
+      const assistantTypeRaw = (await prompt(
+        rl,
+        `  ${C.gray}Assistant type [claude/codex] (default: claude):${C.reset} `,
+      )).trim().toLowerCase()
+      const assistantType = assistantTypeRaw === 'codex' ? 'codex' : 'claude'
       if (rooms.find(r => r.id === ticket)) {
         console.log(`  ${C.yellow}⚠${C.reset}  Room ${C.bold}${ticket}${C.reset} already exists.`)
         await Bun.sleep(900)
         continue
       }
-      await fetch(`${BRIDGE_URL}/api/rooms/${encodeURIComponent(ticket)}`, { method: 'POST' }).catch(() => {})
-      const mode = openRoom(ticket)
+      await fetch(`${BRIDGE_URL}/api/rooms/${encodeURIComponent(ticket)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assistantType }),
+      }).catch(() => {})
+      const mode = openRoom(ticket, assistantType)
       if (mode === 'manual') {
-        console.log(`\n  ${C.gray}[claude]${C.reset}  bridge-claude ${ticket}`)
+        if (assistantType === 'codex') {
+          console.log(`\n  ${C.gray}[codex-peer]${C.reset}  bridge-codex-peer ${ticket}`)
+        } else {
+          console.log(`\n  ${C.gray}[claude]${C.reset}  bridge-claude ${ticket}`)
+        }
         console.log(`  ${C.gray}[codex] ${C.reset}  bridge-codex ${ticket}\n`)
         await prompt(rl, `  ${C.gray}Press Enter once both terminals are running...${C.reset} `)
       } else {
@@ -338,6 +382,7 @@ async function main(): Promise<void> {
         const parts: string[] = []
         if (target.claudeCount > 0) parts.push(`${C.purple}claude${C.reset} ×${target.claudeCount}`)
         if (target.codexCount > 0) parts.push(`${C.green}codex${C.reset} ×${target.codexCount}`)
+        if (target.codexPeerCount > 0) parts.push(`${C.bcyan}codex-peer${C.reset} ×${target.codexPeerCount}`)
         console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${target.roomId}${C.reset}   ${parts.join('   ')}`)
       })
 
@@ -363,8 +408,8 @@ async function main(): Promise<void> {
       console.log()
       rooms.forEach((r, i) => {
         const codex  = r.codexConnected  ? `${C.bgreen}◉${C.reset}`  : `${C.gray}◯${C.reset}`
-        const claude = r.claudeConnected ? `${C.bpurple}◉${C.reset}` : `${C.gray}◯${C.reset}`
-        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${claude} claude`)
+        const assistant = roomAssistantConnected(r) ? `${roomAssistantColor(r)}◉${C.reset}` : `${C.gray}◯${C.reset}`
+        console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${assistant} ${roomAssistantLabel(r)}`)
       })
       const pick = (await prompt(rl, `\n  ${C.gray}Close room # — single or comma-separated (e.g. 1,2,3):${C.reset} `)).trim()
       if (pick) {

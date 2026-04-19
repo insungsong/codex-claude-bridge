@@ -1,0 +1,34 @@
+#!/bin/sh
+# bridge-codex-peer <ROOM_ID>
+# Codex-backed assistant worker를 Codex Bridge 룸에 연결해서 실행한다.
+#
+# Usage:
+#   bridge-codex-peer ENG-1234
+
+ROOM="${1}"
+
+if [ -z "$ROOM" ]; then
+  echo "usage: bridge-codex-peer <ROOM_ID>" >&2
+  echo "  e.g. bridge-codex-peer ENG-1234" >&2
+  exit 1
+fi
+
+BRIDGE_URL="${CODEX_BRIDGE_URL:-http://localhost:8788}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+if ! RESP=$(curl -s -f -X POST "$BRIDGE_URL/api/rooms/$ROOM" \
+  -H 'content-type: application/json' \
+  -d '{"assistantType":"codex"}'); then
+  echo "bridge-codex-peer: failed to reach bridge-server at $BRIDGE_URL" >&2
+  exit 1
+fi
+
+TOKEN=$(echo "$RESP" | grep -o '"sessionToken":"[^"]*"' | cut -d'"' -f4)
+if [ -z "$TOKEN" ]; then
+  echo "bridge-codex-peer: failed to parse token from response:" >&2
+  echo "  $RESP" >&2
+  exit 1
+fi
+
+printf "%s:%s" "$ROOM" "$TOKEN" > "/tmp/codex-peer-bridge-room-$$"
+exec bun "$SCRIPT_DIR/codex-peer.ts"
