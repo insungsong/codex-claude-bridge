@@ -35,7 +35,11 @@ beforeAll(async () => {
   PORT = 20000 + Math.floor(Math.random() * 40000)
   BASE = `http://127.0.0.1:${PORT}`
   server = Bun.spawn(['bun', 'bridge-server.ts'], {
-    env: { ...process.env, CODEX_BRIDGE_PORT: String(PORT) },
+    env: {
+      ...process.env,
+      CODEX_BRIDGE_PORT: String(PORT),
+      CODEX_BRIDGE_STATE_FILE: `/tmp/codex-bridge-state-test-${PORT}.json`,  // ← new
+    },
     stdout: 'ignore',
     stderr: 'ignore',
   })
@@ -50,6 +54,7 @@ beforeAll(async () => {
 afterAll(async () => {
   server?.kill()
   await server?.exited
+  try { unlinkSync(`/tmp/codex-bridge-state-test-${PORT}.json`) } catch {}
 })
 
 describe('session token', () => {

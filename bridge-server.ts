@@ -119,6 +119,7 @@ function isCodexConnected(room: RoomState) {
 // ── Room registry ──
 
 const rooms = new Map<string, RoomState>()
+loadState()
 
 // Tombstone: roomIds deleted within the last 10s. Prevents zombie MCP processes from
 // instantly reviving a room after [c] closes it. Expires automatically after 10s,
@@ -201,6 +202,67 @@ function persistState(): void {
 function schedulePersist(): void {
   if (persistTimer !== null) return
   persistTimer = setTimeout(persistState, PERSIST_DEBOUNCE_MS)
+}
+
+function loadState(): void {
+  if (!existsSync(STATE_FILE)) return
+  let raw: string
+  try {
+    raw = readFileSync(STATE_FILE, 'utf8')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[bridge] state read failed: ${msg}\n`)
+    return
+  }
+  let parsed: PersistedState
+  try {
+    parsed = JSON.parse(raw) as PersistedState
+  } catch {
+    const corruptPath = `${STATE_FILE}.corrupted-${Date.now()}`
+    try { renameSync(STATE_FILE, corruptPath) } catch {}
+    process.stderr.write(`[bridge] state file corrupt; moved to ${corruptPath}\n`)
+    return
+  }
+  if (parsed.version !== PERSIST_VERSION) {
+    process.stderr.write(`[bridge] state version ${parsed.version} != ${PERSIST_VERSION}, skipping\n`)
+    return
+  }
+  const now = Date.now()
+  let restored = 0
+  let skipped = 0
+  for (const sr of parsed.rooms) {
+    if (now - sr.lastActivity > STALE_CUTOFF_MS) {
+      skipped++
+      continue
+    }
+    const pendingReplies = new Map<string, PendingReply>()
+    for (const sp of sr.pendingReplies) {
+      // Drop entries with no reply — the Codex that was waiting has already timed out.
+      if (sp.reply === undefined) continue
+      pendingReplies.set(sp.msgId, {
+        createdAt: sp.createdAt,
+        normalizedMessage: sp.normalizedMessage,
+        reply: sp.reply,
+        waiters: new Set(),
+      })
+    }
+    rooms.set(sr.id, {
+      id: sr.id,
+      createdAt: sr.createdAt,
+      claudeLastSeen: 0,
+      codexLastSeen: 0,
+      lastActivity: sr.lastActivity,
+      pendingReplies,
+      inFlightCodexMessages: new Map(),
+      pendingForCodex: [...sr.pendingForCodex],
+      pendingForClaude: [],
+      pendingForClaudeWaiters: new Set(),
+      sessionToken: sr.sessionToken,
+      clients: new Set(),
+    })
+    restored++
+  }
+  process.stderr.write(`[bridge] state loaded: ${restored} room(s) restored, ${skipped} stale\n`)
 }
 
 // ── Utilities ──
