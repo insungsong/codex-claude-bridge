@@ -1,6 +1,6 @@
 #!/bin/sh
 # bridge-codex-peer <ROOM_ID>
-# Codex-backed assistant worker를 Codex Bridge 룸에 연결해서 실행한다.
+# Codex-backed peer app-server를 띄우고, 해당 peer thread에 붙는 remote Codex를 연다.
 #
 # Usage:
 #   bridge-codex-peer ENG-1234
@@ -37,6 +37,7 @@ if [ -z "$TOKEN" ]; then
 fi
 
 PID_FILE="/tmp/codex-peer-bridge-room-$$"
+LAUNCH_FILE="/tmp/codex-peer-launch-$$"
 printf "%s:%s" "$ROOM" "$TOKEN" > "$PID_FILE"
 
 CODEX_BRIDGE_ROOM="$ROOM" \
@@ -44,7 +45,41 @@ CODEX_BRIDGE_TOKEN="$TOKEN" \
 CODEX_BRIDGE_URL="$BRIDGE_URL" \
 CODEX_BRIDGE_PARENT_PID="$$" \
 CODEX_BRIDGE_PID_FILE="$PID_FILE" \
-nohup bun "$SCRIPT_DIR/codex-peer.ts" >/tmp/codex-peer-worker-"$ROOM".log 2>&1 &
+CODEX_BRIDGE_LAUNCH_FILE="$LAUNCH_FILE" \
+nohup bun "$SCRIPT_DIR/codex-peer.ts" >/tmp/codex-peer-app-"$ROOM".log 2>&1 &
 
-printf '[bridge-codex-peer] room %s companion Codex starting; background worker active.\n' "$ROOM"
-exec codex -c 'mcp_servers.codex-bridge.enabled=false'
+WAIT_COUNT=0
+while [ "$WAIT_COUNT" -lt 75 ]; do
+  if [ -f "$LAUNCH_FILE" ]; then
+    # shellcheck source=/dev/null
+    . "$LAUNCH_FILE"
+    if [ -n "${WS_URL:-}" ]; then
+      break
+    fi
+  fi
+  WAIT_COUNT=$((WAIT_COUNT + 1))
+  sleep 0.2
+done
+
+if [ -z "${WS_URL:-}" ]; then
+  echo "bridge-codex-peer: failed to initialize peer Codex app-server for room $ROOM" >&2
+  echo "  log: /tmp/codex-peer-app-$ROOM.log" >&2
+  exit 1
+fi
+
+printf '[bridge-codex-peer] room %s remote Codex attaching to %s\n' "$ROOM" "$WS_URL"
+exec codex \
+  --remote "$WS_URL" \
+  -c 'features.codex_hooks=false' \
+  -c 'mcp_servers.context7.enabled=false' \
+  -c 'mcp_servers.linear.enabled=false' \
+  -c 'mcp_servers.github.enabled=false' \
+  -c 'mcp_servers.openaiDeveloper.enabled=false' \
+  -c 'mcp_servers.insomnia.enabled=false' \
+  -c 'mcp_servers.codex-bridge.enabled=false' \
+  -c 'mcp_servers.omx_state.enabled=false' \
+  -c 'mcp_servers.omx_memory.enabled=false' \
+  -c 'mcp_servers.omx_code_intel.enabled=false' \
+  -c 'mcp_servers.omx_trace.enabled=false' \
+  -m "${CODEX_BRIDGE_PEER_MODEL:-gpt-5.4}" \
+  "Bridge peer online for room $ROOM. Briefly acknowledge readiness, then wait for further requests from this thread."
