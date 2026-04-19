@@ -158,6 +158,50 @@ function touchRoom(room: RoomState) {
   room.lastActivity = Date.now()
 }
 
+// ── Persistence ──
+
+function serializeRoom(room: RoomState): SerializedRoom {
+  const serializedReplies: SerializedPendingReply[] = []
+  for (const [msgId, pending] of room.pendingReplies) {
+    serializedReplies.push({
+      msgId,
+      createdAt: pending.createdAt,
+      normalizedMessage: pending.normalizedMessage,
+      reply: pending.reply,
+    })
+  }
+  return {
+    id: room.id,
+    createdAt: room.createdAt,
+    sessionToken: room.sessionToken,
+    lastActivity: room.lastActivity,
+    pendingForCodex: [...room.pendingForCodex],
+    pendingReplies: serializedReplies,
+  }
+}
+
+let persistTimer: Timer | null = null
+
+function persistState(): void {
+  persistTimer = null
+  try {
+    const state: PersistedState = {
+      version: PERSIST_VERSION,
+      savedAt: Date.now(),
+      rooms: Array.from(rooms.values()).map(serializeRoom),
+    }
+    writeFileSync(STATE_FILE, JSON.stringify(state), 'utf8')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[bridge] persist failed: ${msg}\n`)
+  }
+}
+
+function schedulePersist(): void {
+  if (persistTimer !== null) return
+  persistTimer = setTimeout(persistState, PERSIST_DEBOUNCE_MS)
+}
+
 // ── Utilities ──
 
 let seq = 0
