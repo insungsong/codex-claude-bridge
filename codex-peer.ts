@@ -16,6 +16,7 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } f
 import { join } from 'node:path'
 
 import { validateBridgeTextPayload } from './bridge-message-payload'
+import { DEFAULT_REPLY_WAIT_POLICY } from './reply-wait-policy'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const CODEX_BIN = process.env.CODEX_BRIDGE_CODEX_BIN ?? 'codex'
@@ -35,7 +36,8 @@ const PARENT_PID = Number(process.env.CODEX_BRIDGE_PARENT_PID ?? '')
 const APP_SERVER_READY_POLL_MS = 200
 const THREAD_PATH_WAIT_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_THREAD_PATH_WAIT_TIMEOUT_MS ?? 10_000)
 const THREAD_READ_POLL_MS = Number(process.env.CODEX_BRIDGE_THREAD_READ_POLL_MS ?? 1000)
-const BRIDGE_TURN_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_TURN_TIMEOUT_MS ?? 120_000)
+const BRIDGE_TURN_TIMEOUT_MS = Number(process.env.CODEX_BRIDGE_TURN_TIMEOUT_MS ?? DEFAULT_REPLY_WAIT_POLICY.maxWaitMs)
+const BRIDGE_PROGRESS_HEARTBEAT_MS = Number(process.env.CODEX_BRIDGE_PROGRESS_HEARTBEAT_MS ?? 15_000)
 const PEER_CONFIG_OVERRIDES = [
   '-c', 'features.codex_hooks=false',
   '-c', 'mcp_servers.context7.enabled=false',
@@ -747,9 +749,15 @@ class CodexPeerBridge {
 
   private async waitForBridgeTurnReply(turnId: string) {
     const deadline = Date.now() + BRIDGE_TURN_TIMEOUT_MS
+    let lastHeartbeatAt = 0
     while (Date.now() < deadline) {
       const turn = await this.readTurn(turnId)
       if (!turn) {
+        const tracked = this.trackedTurns.get(turnId)
+        if (tracked?.bridgeMessageId && Date.now() - lastHeartbeatAt >= BRIDGE_PROGRESS_HEARTBEAT_MS) {
+          lastHeartbeatAt = Date.now()
+          await this.markInProgress(tracked.bridgeMessageId, 'Codex peer is still thinking')
+        }
         await Bun.sleep(THREAD_READ_POLL_MS)
         continue
       }
@@ -761,6 +769,11 @@ class CodexPeerBridge {
         const reply = selectTurnReply(turn.items)
         this.resolveTrackedTurn(turnId, reply)
         return reply
+      }
+
+      if (tracked.bridgeMessageId && Date.now() - lastHeartbeatAt >= BRIDGE_PROGRESS_HEARTBEAT_MS) {
+        lastHeartbeatAt = Date.now()
+        await this.markInProgress(tracked.bridgeMessageId, 'Codex peer is still thinking')
       }
 
       await Bun.sleep(THREAD_READ_POLL_MS)

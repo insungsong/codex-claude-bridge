@@ -31,9 +31,9 @@ import {
   validateBridgeTextPayload,
 } from './bridge-message-payload'
 import { formatReplyProgressStatus, type ReplyProgressSnapshot } from './bridge-reply-progress'
+import { DEFAULT_REPLY_WAIT_POLICY, shouldKeepWaitingForReply } from './reply-wait-policy'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
-const TOTAL_WAIT_MS = 110000
 const POLL_SLICE_MS = 15000
 const POLL_ABORT_GRACE_MS = 3000
 
@@ -220,8 +220,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const { id } = await sendRes.json() as { id: string }
 
           // Poll in short slices to avoid transport-layer timeouts
-          while (Date.now() - startedAt < TOTAL_WAIT_MS) {
-            const remainingMs = TOTAL_WAIT_MS - (Date.now() - startedAt)
+          while (true) {
+            const elapsedMs = Date.now() - startedAt
+            if (elapsedMs >= DEFAULT_REPLY_WAIT_POLICY.maxWaitMs) break
+
+            const remainingMs = DEFAULT_REPLY_WAIT_POLICY.maxWaitMs - elapsedMs
             const pollTimeoutMs = Math.min(POLL_SLICE_MS, remainingMs)
             const controller = new AbortController()
             const clientTimeout = setTimeout(() => controller.abort(), pollTimeoutMs + POLL_ABORT_GRACE_MS)
@@ -260,6 +263,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                 content: [{
                   type: 'text',
                   text: `Claude returned no reply after ${formatElapsedMs(startedAt)}. Do not immediately resend the same prompt.`,
+                }],
+              }
+            }
+
+            const replyStatus = await fetchReplyStatus(id)
+            if (!shouldKeepWaitingForReply(startedAt, replyStatus ?? undefined)) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: formatTimeoutMessage(startedAt, replyStatus ?? undefined),
                 }],
               }
             }
