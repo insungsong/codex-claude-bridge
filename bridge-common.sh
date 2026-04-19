@@ -11,6 +11,25 @@ bridge_is_local_url() {
   esac
 }
 
+bridge_resolve_workdir() {
+  if [ -n "${CODEX_BRIDGE_WORKDIR:-}" ]; then
+    if [ ! -d "$CODEX_BRIDGE_WORKDIR" ]; then
+      echo "bridge: CODEX_BRIDGE_WORKDIR does not exist: $CODEX_BRIDGE_WORKDIR" >&2
+      return 1
+    fi
+    export CODEX_BRIDGE_WORKDIR
+    return 0
+  fi
+
+  if workdir=$(git rev-parse --show-toplevel 2>/dev/null); then
+    export CODEX_BRIDGE_WORKDIR="$workdir"
+    return 0
+  fi
+
+  echo "bridge: run this inside the target git repository, or set CODEX_BRIDGE_WORKDIR explicitly" >&2
+  return 1
+}
+
 bridge_wait_for_health() {
   attempts="${1:-20}"
   i=0

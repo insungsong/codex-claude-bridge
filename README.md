@@ -129,6 +129,11 @@ bun bridge-server.ts
 
 Then for each room, open two terminals and run the wrapper scripts.
 
+Important:
+- Run the wrappers inside the target git repository when possible.
+- If you need to launch from elsewhere, set `CODEX_BRIDGE_WORKDIR=/absolute/project/path` explicitly.
+- The wrappers now fail fast instead of silently using `~` as the peer workspace.
+
 Claude-backed room:
 
 ```bash
@@ -291,6 +296,7 @@ Legacy `_archived/server.ts` preserves the original single-room design — it co
 | `CODEX_BRIDGE_STATE_FILE` | `/tmp/codex-bridge-state.json` | Path to the JSON persistence file. Point at a path in a read-only or non-existent directory to effectively disable persistence — writes will fail and be logged to stderr without interrupting service |
 | `CODEX_BRIDGE_LOG_DIR` | `/tmp` | Directory where per-room message logs (`bridge-<roomId>.jsonl`) are appended |
 | `CODEX_BRIDGE_PEER_MODEL` | `gpt-5.4` | Model used when `bridge-codex-peer` creates the peer Codex app-server thread |
+| `CODEX_BRIDGE_WORKDIR` | current git repo root | Explicit workspace for peer and primary bridge wrappers. Required when launching outside a git repository |
 
 ---
 

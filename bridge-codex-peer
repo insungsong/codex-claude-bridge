@@ -17,6 +17,10 @@ BRIDGE_URL="${CODEX_BRIDGE_URL:-http://localhost:8788}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/bridge-common.sh"
 
+if ! bridge_resolve_workdir; then
+  exit 1
+fi
+
 if ! bridge_ensure_server; then
   echo "bridge-codex-peer: failed to reach bridge-server at $BRIDGE_URL" >&2
   exit 1
@@ -43,6 +47,7 @@ printf "%s:%s" "$ROOM" "$TOKEN" > "$PID_FILE"
 CODEX_BRIDGE_ROOM="$ROOM" \
 CODEX_BRIDGE_TOKEN="$TOKEN" \
 CODEX_BRIDGE_URL="$BRIDGE_URL" \
+CODEX_BRIDGE_WORKDIR="$CODEX_BRIDGE_WORKDIR" \
 CODEX_BRIDGE_PARENT_PID="$$" \
 CODEX_BRIDGE_PID_FILE="$PID_FILE" \
 CODEX_BRIDGE_LAUNCH_FILE="$LAUNCH_FILE" \
@@ -70,6 +75,7 @@ fi
 printf '[bridge-codex-peer] room %s remote Codex attaching to %s\n' "$ROOM" "$WS_URL"
 exec codex \
   --remote "$WS_URL" \
+  -C "$CODEX_BRIDGE_WORKDIR" \
   -c 'features.codex_hooks=false' \
   -c 'mcp_servers.context7.enabled=false' \
   -c 'mcp_servers.linear.enabled=false' \

@@ -17,6 +17,10 @@ BRIDGE_URL="${CODEX_BRIDGE_URL:-http://localhost:8788}"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/bridge-common.sh"
 
+if ! bridge_resolve_workdir; then
+  exit 1
+fi
+
 if ! bridge_ensure_server; then
   echo "bridge-claude: failed to reach bridge-server at $BRIDGE_URL" >&2
   exit 1
@@ -38,4 +42,5 @@ if [ -z "$TOKEN" ]; then
 fi
 
 printf "%s:%s" "$ROOM" "$TOKEN" > "/tmp/claude-bridge-room-$$"
+cd "$CODEX_BRIDGE_WORKDIR" || exit 1
 exec claude --dangerously-load-development-channels server:codex-bridge
