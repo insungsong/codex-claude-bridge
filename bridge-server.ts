@@ -150,6 +150,7 @@ function getOrCreateRoom(roomId: string): RoomState {
       clients: new Set(),
     })
     process.stderr.write(`[bridge] room created: ${roomId}\n`)
+    schedulePersist()
   }
   return rooms.get(roomId)!
 }
@@ -240,6 +241,7 @@ function dropPendingReply(room: RoomState, msgId: string) {
   }
   for (const w of pending.waiters) w.cleanup()
   pending.waiters.clear()
+  schedulePersist()
 }
 
 function pruneExpiredPendingReplies(room: RoomState) {
@@ -254,6 +256,7 @@ function resolveCodexReply(room: RoomState, replyToId: string | undefined, text:
   const pending = room.pendingReplies.get(replyToId)
   if (!pending || pending.reply !== undefined) return
   pending.reply = text
+  schedulePersist()
   if (pending.waiters.size > 0) {
     const waiters = Array.from(pending.waiters)
     dropPendingReply(room, replyToId)
@@ -364,6 +367,7 @@ Bun.serve({
       }
       rooms.delete(roomId)
       markDeleted(roomId)  // tombstone: block auto-create for 10s
+      schedulePersist()
       process.stderr.write(`[bridge] room closed: ${roomId}\n`)
       return new Response(null, { status: 204 })
     }
@@ -487,6 +491,7 @@ Bun.serve({
         broadcast(room, { type: 'msg', id, from: 'claude', text, ts: Date.now(), replyTo })
         if (proactive) {
           room.pendingForCodex.push({ id, text })
+          schedulePersist()
         } else {
           resolveCodexReply(room, replyTo, text)
         }
@@ -524,6 +529,7 @@ Bun.serve({
           waiters: new Set(),
         })
         room.inFlightCodexMessages.set(normalized, id)
+        schedulePersist()
 
         deliverMessageToClaude(room, id, message, 'codex')
         broadcast(room, { type: 'msg', id, from: 'codex', text: message, ts: Date.now() })
