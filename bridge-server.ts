@@ -10,7 +10,7 @@
  * covering-bridge.ts uses GET /api/rooms to show room status.
  */
 
-import { writeFileSync, mkdirSync, readFileSync, renameSync, existsSync } from 'node:fs'
+import { writeFileSync, mkdirSync, readFileSync, renameSync, existsSync, appendFileSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, extname } from 'path'
 import { randomBytes } from 'node:crypto'
@@ -262,6 +262,40 @@ function loadState(): void {
     restored++
   }
   process.stderr.write(`[bridge] state loaded: ${restored} room(s) restored, ${skipped} stale\n`)
+}
+
+// ── Message history log ──
+
+const LOG_DIR = process.env.CODEX_BRIDGE_LOG_DIR ?? '/tmp'
+
+function sanitizeRoomIdForPath(roomId: string): string {
+  // Defense-in-depth: block path traversal characters even though roomId is trusted
+  return roomId.replace(/[^\w.-]/g, '_')
+}
+
+function logMessage(
+  roomId: string,
+  kind: string,
+  id: string,
+  sender: string,
+  text: string,
+): void {
+  try {
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      roomId,
+      kind,
+      id,
+      sender,
+      text,
+    }) + '\n'
+    const path = `${LOG_DIR}/bridge-${sanitizeRoomIdForPath(roomId)}.jsonl`
+    // appendFileSync is fine for dev-scale traffic
+    appendFileSync(path, line, 'utf8')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`[bridge] log failed: ${msg}\n`)
+  }
 }
 
 // ── Utilities ──
@@ -556,6 +590,7 @@ Bun.serve({
         } else {
           resolveCodexReply(room, replyTo, text)
         }
+        logMessage(roomId, proactive ? 'claude→codex:proactive' : 'claude→codex:reply', id, 'claude', text)
         return Response.json({ id })
       })()
     }
@@ -594,6 +629,7 @@ Bun.serve({
 
         deliverMessageToClaude(room, id, message, 'codex')
         broadcast(room, { type: 'msg', id, from: 'codex', text: message, ts: Date.now() })
+        logMessage(roomId, 'codex→claude', id, 'codex', message)
         return Response.json({ id })
       })()
     }

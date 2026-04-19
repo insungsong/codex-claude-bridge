@@ -1,7 +1,7 @@
 // bridge-server.test.ts
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import type { Subprocess } from 'bun'
-import { unlinkSync, existsSync, writeFileSync } from 'fs'
+import { unlinkSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
 function spawnServerWithState(statePath: string, port: number) {
   return Bun.spawn(['bun', 'bridge-server.ts'], {
@@ -267,6 +267,103 @@ describe('state persistence', () => {
       s2.kill()
       await s2.exited
       try { unlinkSync(statePath) } catch {}
+    }
+  }, 15000)
+})
+
+describe('message history log', () => {
+  test('messages from codex are logged as jsonl', async () => {
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+    const roomId = `LOG-TEST-${Date.now()}`
+
+    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_PORT: String(port),
+        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-test-state-${port}.json`,
+        // CODEX_BRIDGE_LOG_DIR unset -> defaults to /tmp
+      },
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      // Codex sends a message
+      await fetch(`${base}/api/rooms/${roomId}/from-codex`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ message: 'hello from codex' }),
+      })
+
+      // Give the appendFileSync a moment to flush (it's sync, so this is just for safety)
+      await Bun.sleep(100)
+
+      const logPath = `/tmp/bridge-${roomId}.jsonl`
+      expect(existsSync(logPath)).toBe(true)
+      const content = readFileSync(logPath, 'utf8')
+      const lines = content.trim().split('\n').map(l => JSON.parse(l))
+      expect(lines.length).toBeGreaterThanOrEqual(1)
+      const codexLine = lines.find((l: { kind: string }) => l.kind === 'codex→claude')
+      expect(codexLine).toBeDefined()
+      expect(codexLine.text).toBe('hello from codex')
+      expect(codexLine.sender).toBe('codex')
+    } finally {
+      s.kill()
+      await s.exited
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+      try { unlinkSync(`/tmp/bridge-log-test-state-${port}.json`) } catch {}
+    }
+  }, 15000)
+
+  test('proactive and reply messages from claude are logged with distinct kinds', async () => {
+    const roomId = `LOG-CLAUDE-${Date.now()}`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_PORT: String(port),
+        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-claude-state-${port}.json`,
+      },
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      // Proactive message
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ text: 'proactive msg', proactive: true }),
+      })
+
+      // Reply (not proactive — this will also try to resolve a pending reply, but none exists; that's fine for the log test)
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ text: 'reply msg', proactive: false }),
+      })
+
+      await Bun.sleep(100)
+
+      const logPath = `/tmp/bridge-${roomId}.jsonl`
+      expect(existsSync(logPath)).toBe(true)
+      const lines = readFileSync(logPath, 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      expect(lines.some((l: { kind: string }) => l.kind === 'claude→codex:proactive')).toBe(true)
+      expect(lines.some((l: { kind: string }) => l.kind === 'claude→codex:reply')).toBe(true)
+    } finally {
+      s.kill()
+      await s.exited
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+      try { unlinkSync(`/tmp/bridge-log-claude-state-${port}.json`) } catch {}
     }
   }, 15000)
 })
