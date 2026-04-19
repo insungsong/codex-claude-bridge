@@ -152,18 +152,6 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['text'],
       },
     },
-    {
-      name: 'edit_message',
-      description: 'Edit a previously sent message in the web UI.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          message_id: { type: 'string' },
-          text: { type: 'string' },
-        },
-        required: ['message_id', 'text'],
-      },
-    },
   ],
 }))
 
@@ -196,12 +184,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         if (!res.ok) throw new Error(`bridge error: ${res.status}`)
         const { id } = await res.json() as { id: string }
         return { content: [{ type: 'text', text: `sent to codex (${id})` }] }
-      }
-
-      case 'edit_message': {
-        // Best-effort: no edit endpoint on bridge-server yet, log locally
-        process.stderr.write(`[claude-mcp] edit_message not yet forwarded to bridge\n`)
-        return { content: [{ type: 'text', text: 'ok' }] }
       }
 
       default:
