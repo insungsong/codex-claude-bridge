@@ -367,3 +367,117 @@ describe('message history log', () => {
     }
   }, 15000)
 })
+
+describe('bridge core correctness', () => {
+  test('long-poll round trip: codex → pending-for-claude → from-claude reply → codex poll resolves', async () => {
+    const roomId = `LP-${Date.now()}`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_PORT: String(port),
+        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-core-state-${port}.json`,
+        CODEX_BRIDGE_LOG_DIR: `/tmp`,
+      },
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      // Codex POSTs /from-codex. The server delivers to Claude queue and
+      // creates a pendingReply; the POST itself returns immediately with an `id`.
+      const sendPromise = fetch(`${base}/api/rooms/${roomId}/from-codex`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ message: 'codex question' }),
+      }).then(r => r.json() as Promise<{ id: string }>)
+      const { id: msgId } = await sendPromise
+      expect(msgId).toBeDefined()
+
+      // Claude-side drain: /pending-for-claude should deliver the codex message
+      const drain = await fetch(`${base}/api/rooms/${roomId}/pending-for-claude?timeout=2000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      expect(drain.status).toBe(200)
+      const { messages } = await drain.json() as { messages: { id: string; text: string }[] }
+      expect(messages.length).toBeGreaterThan(0)
+      const claudeMessage = messages.find(m => m.id === msgId)
+      expect(claudeMessage).toBeDefined()
+      expect(claudeMessage!.text).toBe('codex question')
+
+      // Claude replies with replyTo pointing at codex's msgId
+      const replyPromise = fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-bridge-token': sessionToken },
+        body: JSON.stringify({ text: 'claude answer', replyTo: msgId, proactive: false }),
+      })
+
+      // Codex's long-poll for this msgId should resolve with the reply
+      const pollPromise = fetch(`${base}/api/rooms/${roomId}/poll-reply/${msgId}?timeout=5000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+
+      const [, pollRes] = await Promise.all([replyPromise, pollPromise])
+      expect(pollRes.status).toBe(200)
+      const pollBody = await pollRes.json() as { timeout: boolean; reply: string | null }
+      expect(pollBody.timeout).toBe(false)
+      expect(pollBody.reply).toBe('claude answer')
+    } finally {
+      s.kill()
+      await s.exited
+      try { unlinkSync(`/tmp/bridge-core-state-${port}.json`) } catch {}
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+    }
+  }, 15000)
+
+  test('in-flight dedup: identical messages in quick succession share one reply', async () => {
+    const roomId = `DEDUP-${Date.now()}`
+    const port = 30000 + Math.floor(Math.random() * 20000)
+    const base = `http://127.0.0.1:${port}`
+
+    const s = Bun.spawn(['bun', 'bridge-server.ts'], {
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_PORT: String(port),
+        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-dedup-state-${port}.json`,
+        CODEX_BRIDGE_LOG_DIR: `/tmp`,
+      },
+      stdout: 'ignore',
+      stderr: 'ignore',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      // Fire two identical /from-codex POSTs concurrently
+      const body = JSON.stringify({ message: 'same message' })
+      const headers = { 'content-type': 'application/json', 'x-bridge-token': sessionToken }
+      const [r1, r2] = await Promise.all([
+        fetch(`${base}/api/rooms/${roomId}/from-codex`, { method: 'POST', headers, body }).then(r => r.json() as Promise<{ id: string }>),
+        fetch(`${base}/api/rooms/${roomId}/from-codex`, { method: 'POST', headers, body }).then(r => r.json() as Promise<{ id: string }>),
+      ])
+
+      // Both calls should return the SAME id (dedup via inFlightCodexMessages)
+      expect(r1.id).toBe(r2.id)
+
+      // Verify claude-side: only ONE message in pending-for-claude (not two)
+      const drain = await fetch(`${base}/api/rooms/${roomId}/pending-for-claude?timeout=2000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      const { messages } = await drain.json() as { messages: { id: string }[] }
+      const matching = messages.filter(m => m.id === r1.id)
+      expect(matching.length).toBe(1)
+    } finally {
+      s.kill()
+      await s.exited
+      try { unlinkSync(`/tmp/bridge-dedup-state-${port}.json`) } catch {}
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+    }
+  }, 10000)
+})
