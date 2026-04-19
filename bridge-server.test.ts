@@ -1,6 +1,19 @@
 // bridge-server.test.ts
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import type { Subprocess } from 'bun'
+import { unlinkSync, existsSync, writeFileSync } from 'fs'
+
+function spawnServerWithState(statePath: string, port: number) {
+  return Bun.spawn(['bun', 'bridge-server.ts'], {
+    env: {
+      ...process.env,
+      CODEX_BRIDGE_PORT: String(port),
+      CODEX_BRIDGE_STATE_FILE: statePath,
+    },
+    stdout: 'ignore',
+    stderr: 'ignore',
+  })
+}
 
 let server: Subprocess | null = null
 let PORT = 0
