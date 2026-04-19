@@ -246,7 +246,7 @@ codex-mcp.ts        Codex-side MCP server. One instance per room (CODEX_BRIDGE_R
 covering-bridge.ts  Interactive CLI. Manages rooms, opens terminals automatically.
 ```
 
-Legacy `server.ts` is kept for reference — it combined the HTTP server and Claude MCP in one process (single-room only).
+Legacy `_archived/server.ts` preserves the original single-room design — it combined the HTTP server and Claude MCP in one process. Kept for reference; not built, run, or tested.
 
 ---
 
