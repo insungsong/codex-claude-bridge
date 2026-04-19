@@ -10,8 +10,7 @@
  * covering-bridge.ts uses GET /api/rooms to show room status.
  */
 
-import { writeFileSync, mkdirSync, readFileSync } from 'fs'
-import { renameSync, existsSync } from 'node:fs'
+import { writeFileSync, mkdirSync, readFileSync, renameSync, existsSync } from 'node:fs'
 import { homedir } from 'os'
 import { join, extname } from 'path'
 import { randomBytes } from 'node:crypto'

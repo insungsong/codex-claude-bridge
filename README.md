@@ -237,7 +237,7 @@ Legacy `server.ts` is kept for reference — it combined the HTTP server and Cla
 | `CODEX_BRIDGE_ROOM` | *(required)* | Room ID — use your ticket number e.g. `ENG-1234` |
 | `CODEX_BRIDGE_URL` | `http://localhost:8788` | Bridge server URL |
 | `CODEX_BRIDGE_PORT` | `8788` | Bridge server port |
-| `CODEX_BRIDGE_STATE_FILE` | `/tmp/codex-bridge-state.json` | Path to the JSON persistence file. Set to any path under `/dev/null` to effectively disable persistence (writes will fail silently) |
+| `CODEX_BRIDGE_STATE_FILE` | `/tmp/codex-bridge-state.json` | Path to the JSON persistence file. Point at a path in a read-only or non-existent directory to effectively disable persistence — writes will fail and be logged to stderr without interrupting service |
 
 ---
 
