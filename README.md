@@ -192,6 +192,26 @@ bun test
 
 ---
 
+## Message history logs
+
+Every bridged message is appended as JSONL to `${CODEX_BRIDGE_LOG_DIR:-/tmp}/bridge-<roomId>.jsonl`. Useful for `tail -f` during debugging or `jq` after the fact:
+
+```bash
+tail -f /tmp/bridge-ENG-1234.jsonl | jq .
+```
+
+Log entries have the form:
+
+```json
+{"ts":"2026-04-19T14:12:03.412Z","roomId":"ENG-1234","kind":"codex→claude","id":"m1745-2","sender":"codex","text":"..."}
+```
+
+Kinds: `codex→claude`, `claude→codex:reply`, `claude→codex:proactive`.
+
+Logs grow unbounded — delete or rotate manually (`rm /tmp/bridge-*.jsonl`).
+
+---
+
 ## Web UI
 
 Open [http://localhost:8788](http://localhost:8788) to watch all rooms in real time.
@@ -238,6 +258,7 @@ Legacy `server.ts` is kept for reference — it combined the HTTP server and Cla
 | `CODEX_BRIDGE_URL` | `http://localhost:8788` | Bridge server URL |
 | `CODEX_BRIDGE_PORT` | `8788` | Bridge server port |
 | `CODEX_BRIDGE_STATE_FILE` | `/tmp/codex-bridge-state.json` | Path to the JSON persistence file. Point at a path in a read-only or non-existent directory to effectively disable persistence — writes will fail and be logged to stderr without interrupting service |
+| `CODEX_BRIDGE_LOG_DIR` | `/tmp` | Directory where per-room message logs (`bridge-<roomId>.jsonl`) are appended |
 
 ---
 
