@@ -16,6 +16,21 @@ import { join, extname } from 'path'
 import { randomBytes } from 'node:crypto'
 import type { ServerWebSocket } from 'bun'
 
+import {
+  normalizeBridgeMessage,
+  validateBridgeTextPayload,
+} from './bridge-message-payload'
+import {
+  createReplyProgress,
+  formatReplyProgressStatus,
+  markReplyCompleted,
+  markReplyDelivered,
+  markReplyInProgress,
+  serializeReplyProgress,
+  type ReplyProgress,
+  type ReplyProgressSnapshot,
+} from './bridge-reply-progress'
+
 const PORT = Number(process.env.CODEX_BRIDGE_PORT ?? 8788)
 const STATE_FILE = process.env.CODEX_BRIDGE_STATE_FILE ?? '/tmp/codex-bridge-state.json'
 const PERSIST_VERSION = 1
@@ -49,6 +64,7 @@ type ReplyWaiter = {
 type PendingReply = {
   createdAt: number
   normalizedMessage?: string
+  progress: ReplyProgress
   reply?: string
   waiters: Set<ReplyWaiter>
 }
@@ -89,6 +105,7 @@ type SerializedPendingReply = {
   msgId: string
   createdAt: number
   normalizedMessage?: string
+  progress?: ReplyProgress
   reply?: string
 }
 
@@ -168,6 +185,7 @@ function serializeRoom(room: RoomState): SerializedRoom {
       msgId,
       createdAt: pending.createdAt,
       normalizedMessage: pending.normalizedMessage,
+      progress: pending.progress,
       reply: pending.reply,
     })
   }
@@ -238,9 +256,12 @@ function loadState(): void {
     for (const sp of sr.pendingReplies) {
       // Drop entries with no reply — the Codex that was waiting has already timed out.
       if (sp.reply === undefined) continue
+      const progress = sp.progress ?? createReplyProgress(sp.createdAt)
+      markReplyCompleted(progress, sp.createdAt)
       pendingReplies.set(sp.msgId, {
         createdAt: sp.createdAt,
         normalizedMessage: sp.normalizedMessage,
+        progress,
         reply: sp.reply,
         waiters: new Set(),
       })
@@ -305,10 +326,6 @@ function nextId(prefix = 'm') {
   return `${prefix}${Date.now()}-${++seq}`
 }
 
-function normalizeMessage(message: string) {
-  return message.trim().replace(/\s+/g, ' ')
-}
-
 function mime(ext: string) {
   const m: Record<string, string> = {
     '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
@@ -339,6 +356,27 @@ function dropPendingReply(room: RoomState, msgId: string) {
   schedulePersist()
 }
 
+function listActiveReplyStatuses(room: RoomState) {
+  const statuses: ReplyProgressSnapshot[] = []
+  for (const [msgId, pending] of room.pendingReplies) {
+    if (pending.progress.state === 'replied') continue
+    statuses.push(serializeReplyProgress(msgId, pending.progress))
+  }
+  return statuses
+}
+
+function markDeliveredMessages(room: RoomState, messages: Array<{ id: string; sender: string }>) {
+  let changed = false
+  for (const message of messages) {
+    if (message.sender !== 'codex') continue
+    const pending = room.pendingReplies.get(message.id)
+    if (!pending) continue
+    if (pending.progress.state === 'queued') changed = true
+    markReplyDelivered(pending.progress)
+  }
+  if (changed) schedulePersist()
+}
+
 function pruneExpiredPendingReplies(room: RoomState) {
   const now = Date.now()
   for (const [msgId, pending] of room.pendingReplies) {
@@ -351,6 +389,7 @@ function resolveCodexReply(room: RoomState, replyToId: string | undefined, text:
   const pending = room.pendingReplies.get(replyToId)
   if (!pending || pending.reply !== undefined) return
   pending.reply = text
+  markReplyCompleted(pending.progress)
   schedulePersist()
   if (pending.waiters.size > 0) {
     const waiters = Array.from(pending.waiters)
@@ -381,6 +420,7 @@ function deliverMessageToClaude(
   room.pendingForClaude.push({ id, text, sender, replyTo })
   if (room.pendingForClaudeWaiters.size > 0) {
     const messages = room.pendingForClaude.splice(0)
+    markDeliveredMessages(room, messages)
     const waiters = Array.from(room.pendingForClaudeWaiters)
     room.pendingForClaudeWaiters.clear()
     for (const w of waiters) w.resolve(Response.json({ messages }))
@@ -545,7 +585,9 @@ Bun.serve({
       const timeout = Number(url.searchParams.get('timeout') ?? 30000)
 
       if (room.pendingForClaude.length > 0) {
-        return Response.json({ messages: room.pendingForClaude.splice(0) })
+        const messages = room.pendingForClaude.splice(0)
+        markDeliveredMessages(room, messages)
+        return Response.json({ messages })
       }
 
       return new Promise<Response>(resolve => {
@@ -581,7 +623,13 @@ Bun.serve({
         if (authFail) return authFail
         touchRoom(room)
         const body = await req.json() as { text: string; replyTo?: string; proactive?: boolean }
-        const { text, replyTo, proactive } = body
+        const { replyTo, proactive } = body
+        const validation = validateBridgeTextPayload(body.text)
+        if (validation.ok === false) {
+          return Response.json({ error: validation.error }, { status: 400 })
+        }
+
+        const text = validation.text
         const id = nextId('claude-')
         broadcast(room, { type: 'msg', id, from: 'claude', text, ts: Date.now(), replyTo })
         if (proactive) {
@@ -608,10 +656,14 @@ Bun.serve({
         pruneExpiredPendingReplies(room)
 
         const body = await req.json() as { message: string }
-        const message = body.message?.trim()
-        if (!message) return new Response('missing message', { status: 400 })
+        const validation = validateBridgeTextPayload(body.message)
+        if (validation.ok === false) {
+          return new Response(validation.error, { status: 400 })
+        }
 
-        const normalized = normalizeMessage(message)
+        const message = validation.text
+
+        const normalized = normalizeBridgeMessage(message)
         const existingId = room.inFlightCodexMessages.get(normalized)
         if (existingId && room.pendingReplies.has(existingId)) {
           return Response.json({ id: existingId })
@@ -622,6 +674,7 @@ Bun.serve({
         room.pendingReplies.set(id, {
           createdAt: Date.now(),
           normalizedMessage: normalized,
+          progress: createReplyProgress(),
           waiters: new Set(),
         })
         room.inFlightCodexMessages.set(normalized, id)
@@ -632,6 +685,52 @@ Bun.serve({
         logMessage(roomId, 'codex→claude', id, 'codex', message)
         return Response.json({ id })
       })()
+    }
+
+    const progressMatch = sub.match(/^reply-progress\/(.+)$/)
+    if (progressMatch && req.method === 'POST') {
+      return (async () => {
+        const room = rooms.get(roomId)
+        if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+        const authFail = checkToken(req, room)
+        if (authFail) return authFail
+        touchRoom(room)
+
+        const pending = room.pendingReplies.get(progressMatch[1])
+        if (!pending) return Response.json({ error: 'reply not found' }, { status: 404 })
+
+        const body = await req.json() as { note?: string }
+        markReplyInProgress(pending.progress, body.note)
+        schedulePersist()
+
+        return Response.json({
+          ok: true,
+          status: {
+            ...serializeReplyProgress(progressMatch[1], pending.progress),
+            summary: formatReplyProgressStatus(pending.progress),
+          },
+        })
+      })()
+    }
+
+    const statusMatch = sub.match(/^reply-status\/(.+)$/)
+    if (statusMatch && req.method === 'GET') {
+      const room = rooms.get(roomId)
+      if (!room) return Response.json({ found: false }, { status: 404 })
+      const authFail = checkToken(req, room)
+      if (authFail) return authFail
+      touchRoom(room)
+
+      const pending = room.pendingReplies.get(statusMatch[1])
+      if (!pending) return Response.json({ found: false }, { status: 404 })
+
+      return Response.json({
+        found: true,
+        status: {
+          ...serializeReplyProgress(statusMatch[1], pending.progress),
+          summary: formatReplyProgressStatus(pending.progress),
+        },
+      })
     }
 
     // GET /api/rooms/:roomId/poll-reply/:id — Codex long-polls for Claude's reply
@@ -688,7 +787,11 @@ Bun.serve({
       pruneExpiredPendingReplies(room)
       touchRoom(room)
       const messages = [...room.pendingForCodex.splice(0), ...drainLateRepliesForCodex(room)]
-      return Response.json({ messages })
+      const statuses = listActiveReplyStatuses(room).map(status => ({
+        ...status,
+        summary: formatReplyProgressStatus(status),
+      }))
+      return Response.json({ messages, statuses })
     }
 
     // POST /api/rooms/:roomId/upload — file upload from web UI

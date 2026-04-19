@@ -26,6 +26,12 @@ import {
 import { execFileSync } from 'child_process'
 import { readFileSync } from 'fs'
 
+import {
+  normalizeBridgeMessage,
+  validateBridgeTextPayload,
+} from './bridge-message-payload'
+import { formatReplyProgressStatus, type ReplyProgressSnapshot } from './bridge-reply-progress'
+
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const TOTAL_WAIT_MS = 110000
 const POLL_SLICE_MS = 15000
@@ -107,12 +113,30 @@ type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean
 
 const inFlightMessages = new Map<string, Promise<ToolResult>>()
 
-function normalizeMessage(message: string) {
-  return message.trim().replace(/\s+/g, ' ')
-}
-
 function formatElapsedMs(startMs: number) {
   return `${Math.round((Date.now() - startMs) / 1000)}s`
+}
+
+function formatTimeoutMessage(startMs: number, status?: ReplyProgressSnapshot & { summary?: string }) {
+  const elapsed = formatElapsedMs(startMs)
+  if (!status) {
+    return `Claude did not reply within ${elapsed}. Do not immediately resend the same prompt.`
+  }
+
+  const summary = status.summary ?? formatReplyProgressStatus(status)
+  return `Claude has not produced a final reply within ${elapsed}. ${summary} Do not immediately resend the same prompt.`
+}
+
+async function fetchReplyStatus(id: string) {
+  const res = await bridgeFetch(`/reply-status/${id}`)
+  exitOnAuthFail(res.status, 'send_to_claude/reply-status')
+  if (!res.ok) return null
+  const data = await res.json() as {
+    found: boolean
+    status?: ReplyProgressSnapshot & { summary?: string }
+  }
+  if (!data.found || !data.status) return null
+  return data.status
 }
 
 const mcp = new Server(
@@ -161,12 +185,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'send_to_claude': {
-        const message = args.message as string
-        if (!message?.trim()) {
-          return { content: [{ type: 'text', text: 'error: empty message' }], isError: true }
+        const validation = validateBridgeTextPayload(args.message)
+        if (validation.ok === false) {
+          return { content: [{ type: 'text', text: `error: ${validation.error}` }], isError: true }
         }
 
-        const normalized = normalizeMessage(message)
+        const message = validation.text
+        const normalized = normalizeBridgeMessage(message)
         const existing = inFlightMessages.get(normalized)
         if (existing) return await existing
 
@@ -177,7 +202,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           const sendRes = await bridgeFetch('/from-codex', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ message: message.trim() }),
+            body: JSON.stringify({ message }),
           })
           exitOnAuthFail(sendRes.status, 'send_to_claude/from-codex')
 
@@ -237,10 +262,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             }
           }
 
+          const replyStatus = await fetchReplyStatus(id)
           return {
             content: [{
               type: 'text',
-              text: `Claude did not reply within ${formatElapsedMs(startedAt)}. Do not immediately resend the same prompt.`,
+              text: formatTimeoutMessage(startedAt, replyStatus ?? undefined),
             }],
           }
         })()
@@ -264,12 +290,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             isError: true,
           }
         }
-        const { messages } = await res.json() as { messages: { id: string; text: string }[] }
-        if (messages.length === 0) {
+        const {
+          messages,
+          statuses = [],
+        } = await res.json() as {
+          messages: { id: string; text: string }[]
+          statuses?: Array<ReplyProgressSnapshot & { summary?: string }>
+        }
+        if (messages.length === 0 && statuses.length === 0) {
           return { content: [{ type: 'text', text: 'No pending messages from Claude.' }] }
         }
-        const formatted = messages.map(m => `[${m.id}] ${m.text}`).join('\n\n---\n\n')
-        return { content: [{ type: 'text', text: `${messages.length} message(s) from Claude:\n\n${formatted}` }] }
+        const sections: string[] = []
+        if (messages.length > 0) {
+          const formattedMessages = messages.map(m => `[${m.id}] ${m.text}`).join('\n\n---\n\n')
+          sections.push(`${messages.length} message(s) from Claude:\n\n${formattedMessages}`)
+        }
+        if (statuses.length > 0) {
+          const formattedStatuses = statuses
+            .map(status => `[${status.id}] ${status.summary ?? formatReplyProgressStatus(status)}`)
+            .join('\n\n---\n\n')
+          sections.push(`Active Claude work:\n\n${formattedStatuses}`)
+        }
+        return { content: [{ type: 'text', text: sections.join('\n\n===\n\n') }] }
       }
 
       default:

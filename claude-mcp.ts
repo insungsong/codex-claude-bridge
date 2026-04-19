@@ -23,6 +23,8 @@ import {
 import { execFileSync } from 'child_process'
 import { readFileSync } from 'fs'
 
+import { validateBridgeTextPayload } from './bridge-message-payload'
+
 // Claude Code strips env vars when spawning MCP servers.
 // Workaround: covering-bridge runs `sh -c 'printf "roomId" > /tmp/claude-bridge-room-$$; exec claude ...'`
 // exec replaces sh with node-claude, keeping the same PID (X).
@@ -121,6 +123,7 @@ const mcp = new Server(
     instructions: [
       `You are connected to Codex Bridge, room ${ROOM_ID}.`,
       'Messages from Codex arrive as <channel source="codex-bridge" sender="codex" ...>.',
+      'If a Codex request will take more than a quick answer, call mark_in_progress with the message_id before starting the longer work.',
       'Reply with the reply tool. ALWAYS pass reply_to with the message_id — critical for routing.',
       `Web UI: ${BRIDGE_URL}`,
     ].join('\n'),
@@ -152,6 +155,18 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['text'],
       },
     },
+    {
+      name: 'mark_in_progress',
+      description: 'Mark a Codex request as actively in progress so Codex can distinguish long-running work from silence.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          reply_to: { type: 'string', description: 'message_id of the Codex message being worked on' },
+          note: { type: 'string', description: 'Optional short status note, e.g. "running tests"' },
+        },
+        required: ['reply_to'],
+      },
+    },
   ],
 }))
 
@@ -160,7 +175,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'reply': {
-        const text = args.text as string
+        const validation = validateBridgeTextPayload(args.text)
+        if (validation.ok === false) {
+          return { content: [{ type: 'text', text: `reply: ${validation.error}` }], isError: true }
+        }
+
+        const text = validation.text
         const replyTo = args.reply_to as string | undefined
         const res = await bridgeFetch('/from-claude', {
           method: 'POST',
@@ -174,7 +194,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
 
       case 'send_to_codex': {
-        const text = args.text as string
+        const validation = validateBridgeTextPayload(args.text)
+        if (validation.ok === false) {
+          return { content: [{ type: 'text', text: `send_to_codex: ${validation.error}` }], isError: true }
+        }
+
+        const text = validation.text
         const res = await bridgeFetch('/from-claude', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
@@ -186,6 +211,35 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: `sent to codex (${id})` }] }
       }
 
+      case 'mark_in_progress': {
+        const replyTo = args.reply_to as string | undefined
+        if (!replyTo?.trim()) {
+          return { content: [{ type: 'text', text: 'mark_in_progress: reply_to is required' }], isError: true }
+        }
+
+        const noteValidation = args.note === undefined
+          ? null
+          : validateBridgeTextPayload(args.note)
+        if (noteValidation && noteValidation.ok === false) {
+          return { content: [{ type: 'text', text: `mark_in_progress: ${noteValidation.error}` }], isError: true }
+        }
+
+        const note = noteValidation?.ok ? noteValidation.text : undefined
+        const res = await bridgeFetch(`/reply-progress/${encodeURIComponent(replyTo.trim())}`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ note }),
+        })
+        exitOnAuthFail(res.status, 'mark_in_progress/reply-progress')
+        if (!res.ok) throw new Error(`bridge error: ${res.status}`)
+        const { status } = await res.json() as { status: { summary?: string } }
+        return {
+          content: [{
+            type: 'text',
+            text: `marked in progress${status?.summary ? `: ${status.summary}` : ''}`,
+          }],
+        }
+      }
       default:
         return { content: [{ type: 'text', text: `unknown: ${req.params.name}` }], isError: true }
     }
