@@ -122,7 +122,8 @@ const mcp = new Server(
     capabilities: { tools: {}, experimental: { 'claude/channel': {} } },
     instructions: [
       `You are connected to Codex Bridge, room ${ROOM_ID}.`,
-      'Messages from Codex arrive as <channel source="codex-bridge" sender="codex" ...>.',
+      'Messages from Codex arrive as <channel source="codex-bridge" sender="codex" message_id="..." ...>.',
+      'The message_id attribute in the channel tag is what you pass as reply_to.',
       'If a Codex request will take more than a quick answer, call mark_in_progress with the message_id before starting the longer work.',
       'Reply with the reply tool. ALWAYS pass reply_to with the message_id — critical for routing.',
       `Web UI: ${BRIDGE_URL}`,
@@ -141,7 +142,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string' },
           reply_to: { type: 'string', description: 'message_id of the message being replied to' },
         },
-        required: ['text'],
+        required: ['text', 'reply_to'],
       },
     },
     {
@@ -175,13 +176,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
     switch (req.params.name) {
       case 'reply': {
+        const replyTo = args.reply_to as string | undefined
+        if (!replyTo?.trim()) {
+          return { content: [{ type: 'text', text: 'reply: reply_to is required — pass the message_id from the channel notification' }], isError: true }
+        }
+
         const validation = validateBridgeTextPayload(args.text)
         if (validation.ok === false) {
           return { content: [{ type: 'text', text: `reply: ${validation.error}` }], isError: true }
         }
 
         const text = validation.text
-        const replyTo = args.reply_to as string | undefined
         const res = await bridgeFetch('/from-claude', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
