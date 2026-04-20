@@ -431,14 +431,14 @@ async function main(): Promise<void> {
     if (choice === 'c' || choice === 'close') {
       if (rooms.length === 0) { console.log(`  ${C.gray}No rooms to close.${C.reset}`); await Bun.sleep(700); continue }
       console.log()
-      rooms.forEach((r, i) => {
+      const sorted = [...rooms].sort((a, b) => a.id.localeCompare(b.id))
+      sorted.forEach((r, i) => {
         const codex  = r.codexConnected  ? `${C.bgreen}◉${C.reset}`  : `${C.gray}◯${C.reset}`
         const assistant = roomAssistantConnected(r) ? `${roomAssistantColor(r)}◉${C.reset}` : `${C.gray}◯${C.reset}`
         console.log(`  ${C.bold}[${i + 1}]${C.reset}  ${C.bold}${r.id}${C.reset}   ${codex} codex  ${assistant} ${roomAssistantLabel(r)}`)
       })
       const pick = (await prompt(rl, `\n  ${C.gray}Close room # — single or comma-separated (e.g. 1,2,3):${C.reset} `)).trim()
       if (pick) {
-        const sorted = [...rooms].sort((a, b) => a.id.localeCompare(b.id))
         const indices = parseSelection(pick, sorted.length)
         for (const idx of indices) {
           const target = sorted[idx].id
