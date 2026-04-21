@@ -7,8 +7,12 @@ describe('reply wait policy', () => {
     expect(shouldKeepWaitingForReply(0, null, 100_000)).toBe(true)
   })
 
-  test('stops waiting after the base window if no assistant progress exists', () => {
+  test('stops waiting after the base window if no status and peer is unknown', () => {
     expect(shouldKeepWaitingForReply(0, null, 150_000)).toBe(false)
+  })
+
+  test('keeps waiting after the base window when no status but peer is alive', () => {
+    expect(shouldKeepWaitingForReply(0, null, 150_000, undefined, true)).toBe(true)
   })
 
   test('keeps waiting beyond the base window when assistant progress is fresh', () => {
@@ -22,7 +26,7 @@ describe('reply wait policy', () => {
     }, 150_000)).toBe(true)
   })
 
-  test('stops waiting when assistant progress is stale', () => {
+  test('stops waiting when assistant progress is stale and peer is not confirmed alive', () => {
     expect(shouldKeepWaitingForReply(0, {
       id: 'msg-1',
       state: 'in_progress',
@@ -33,7 +37,27 @@ describe('reply wait policy', () => {
     }, 150_000)).toBe(false)
   })
 
-  test('stops waiting once the maximum window is exhausted', () => {
+  test('keeps waiting when progress is stale but peer is still connected', () => {
+    expect(shouldKeepWaitingForReply(0, {
+      id: 'msg-1',
+      state: 'in_progress',
+      createdAt: 0,
+      deliveredAt: 20_000,
+      lastProgressAt: 1_000,
+      progressNote: 'old progress',
+    }, 400_000, undefined, true)).toBe(true)
+  })
+
+  test('keeps waiting when state is only delivered (no progress note) and peer is alive', () => {
+    expect(shouldKeepWaitingForReply(0, {
+      id: 'msg-1',
+      state: 'delivered',
+      createdAt: 0,
+      deliveredAt: 1_000,
+    }, 500_000, undefined, true)).toBe(true)
+  })
+
+  test('stops waiting once the maximum window is exhausted even with a live peer', () => {
     expect(shouldKeepWaitingForReply(0, {
       id: 'msg-1',
       state: 'in_progress',
@@ -41,6 +65,16 @@ describe('reply wait policy', () => {
       deliveredAt: 20_000,
       lastProgressAt: 599_000,
       progressNote: 'recent progress',
-    }, 601_000)).toBe(false)
+    }, 601_000, undefined, true)).toBe(false)
+  })
+
+  test('queued state waits when peer is alive, stops otherwise', () => {
+    const queued = {
+      id: 'msg-1',
+      state: 'queued' as const,
+      createdAt: 0,
+    }
+    expect(shouldKeepWaitingForReply(0, queued, 150_000, undefined, false)).toBe(false)
+    expect(shouldKeepWaitingForReply(0, queued, 150_000, undefined, true)).toBe(true)
   })
 })

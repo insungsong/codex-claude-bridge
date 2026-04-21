@@ -37,6 +37,12 @@ const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const POLL_SLICE_MS = 15000
 const POLL_ABORT_GRACE_MS = 3000
 
+const REPLY_WAIT_POLICY = (() => {
+  const override = Number(process.env.CODEX_BRIDGE_MAX_WAIT_MS)
+  if (!Number.isFinite(override) || override <= 0) return DEFAULT_REPLY_WAIT_POLICY
+  return { ...DEFAULT_REPLY_WAIT_POLICY, maxWaitMs: override }
+})()
+
 // Codex strips most env vars when spawning MCP servers (only HOME/LANG/PATH survive).
 // Fallback: covering-bridge starts Codex via `sh -c 'printf "roomId:token" > /tmp/codex-bridge-room-$$; exec codex'`.
 // Because exec replaces sh without changing PID, $$ == the node-wrapper PID.
@@ -111,32 +117,48 @@ function exitOnAuthFail(status: number, where: string): void {
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
+type ReplyStatusInfo = {
+  status: ReplyProgressSnapshot & { summary?: string }
+  peerAlive: boolean
+}
+
 const inFlightMessages = new Map<string, Promise<ToolResult>>()
 
 function formatElapsedMs(startMs: number) {
   return `${Math.round((Date.now() - startMs) / 1000)}s`
 }
 
-function formatTimeoutMessage(startMs: number, status?: ReplyProgressSnapshot & { summary?: string }) {
+function formatTimeoutMessage(startMs: number, info?: ReplyStatusInfo) {
   const elapsed = formatElapsedMs(startMs)
-  if (!status) {
-    return `Claude did not reply within ${elapsed}. Do not immediately resend the same prompt.`
+
+  if (info?.peerAlive && info.status.state !== 'replied') {
+    const summary = info.status.summary ?? formatReplyProgressStatus(info.status)
+    return [
+      `Claude 세션은 여전히 연결되어 있고 ${elapsed} 동안 작업 중입니다.`,
+      summary,
+      '같은 본문을 재전송하지 마세요. 잠시 후 `check_claude_messages`로 답변을 확인하거나 진행 상황을 다시 문의하세요.',
+    ].join(' ')
   }
 
-  const summary = status.summary ?? formatReplyProgressStatus(status)
-  return `Claude has not produced a final reply within ${elapsed}. ${summary} Do not immediately resend the same prompt.`
+  if (!info) {
+    return `${elapsed} 동안 Claude로부터 응답이 없었습니다. 같은 본문을 즉시 재전송하지 마세요.`
+  }
+
+  const summary = info.status.summary ?? formatReplyProgressStatus(info.status)
+  return `${elapsed} 동안 Claude가 최종 답변을 내지 않았습니다. ${summary} 같은 본문을 즉시 재전송하지 마세요.`
 }
 
-async function fetchReplyStatus(id: string) {
+async function fetchReplyStatus(id: string): Promise<ReplyStatusInfo | null> {
   const res = await bridgeFetch(`/reply-status/${id}`)
   exitOnAuthFail(res.status, 'send_to_claude/reply-status')
   if (!res.ok) return null
   const data = await res.json() as {
     found: boolean
+    peerAlive?: boolean
     status?: ReplyProgressSnapshot & { summary?: string }
   }
   if (!data.found || !data.status) return null
-  return data.status
+  return { status: data.status, peerAlive: data.peerAlive ?? false }
 }
 
 const mcp = new Server(
@@ -222,9 +244,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           // Poll in short slices to avoid transport-layer timeouts
           while (true) {
             const elapsedMs = Date.now() - startedAt
-            if (elapsedMs >= DEFAULT_REPLY_WAIT_POLICY.maxWaitMs) break
+            if (elapsedMs >= REPLY_WAIT_POLICY.maxWaitMs) break
 
-            const remainingMs = DEFAULT_REPLY_WAIT_POLICY.maxWaitMs - elapsedMs
+            const remainingMs = REPLY_WAIT_POLICY.maxWaitMs - elapsedMs
             const pollTimeoutMs = Math.min(POLL_SLICE_MS, remainingMs)
             const controller = new AbortController()
             const clientTimeout = setTimeout(() => controller.abort(), pollTimeoutMs + POLL_ABORT_GRACE_MS)
@@ -262,13 +284,19 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               return {
                 content: [{
                   type: 'text',
-                  text: `Claude returned no reply after ${formatElapsedMs(startedAt)}. Do not immediately resend the same prompt.`,
+                  text: `${formatElapsedMs(startedAt)} 동안 Claude가 빈 응답을 반환했습니다. 같은 본문을 즉시 재전송하지 마세요.`,
                 }],
               }
             }
 
             const replyStatus = await fetchReplyStatus(id)
-            if (!shouldKeepWaitingForReply(startedAt, replyStatus ?? undefined)) {
+            if (!shouldKeepWaitingForReply(
+              startedAt,
+              replyStatus?.status,
+              undefined,
+              REPLY_WAIT_POLICY,
+              replyStatus?.peerAlive ?? false,
+            )) {
               return {
                 content: [{
                   type: 'text',

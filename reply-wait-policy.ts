@@ -21,14 +21,23 @@ export function shouldKeepWaitingForReply(
   status: ReplyProgressSnapshot | null | undefined,
   now = Date.now(),
   options: ReplyWaitPolicyOptions = DEFAULT_REPLY_WAIT_POLICY,
+  peerAlive = false,
 ) {
   const elapsedMs = now - startedAt
 
   if (elapsedMs < options.baseWaitMs) return true
   if (elapsedMs >= options.maxWaitMs) return false
-  if (!status) return false
-  if (status.state === 'queued') return false
 
+  // No status yet: only keep waiting if the peer session is actively connected.
+  if (!status) return peerAlive
+
+  // Queued = bridge hasn't delivered to assistant yet. Wait only if peer is alive.
+  if (status.state === 'queued') return peerAlive
+
+  // Delivered or in_progress + peer alive: heartbeat counts as activity — keep waiting.
+  if (peerAlive) return true
+
+  // Peer disconnected: fall back to stale-progress check so we don't wait on a dead session.
   const lastActivityAt = latestReplyActivityAt(status)
   return now - lastActivityAt <= options.staleProgressMs
 }

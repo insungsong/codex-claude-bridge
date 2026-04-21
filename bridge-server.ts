@@ -802,6 +802,7 @@ Bun.serve({
 
       return Response.json({
         found: true,
+        peerAlive: isAssistantConnected(room),
         status: {
           ...serializeReplyProgress(statusMatch[1], pending.progress),
           summary: formatReplyProgressStatus(pending.progress),
