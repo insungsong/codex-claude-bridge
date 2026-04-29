@@ -3,19 +3,50 @@ import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { spawn, type ChildProcess } from 'child_process'
 import { unlinkSync, existsSync, writeFileSync, readFileSync } from 'fs'
 
-function spawnServerWithState(statePath: string, port: number) {
-  return spawn('bun', ['bridge-server.ts'], {
+let nextTestPort = 24567
+const processOutput = new WeakMap<ChildProcess, string[]>()
+
+function getTestPort() {
+  return nextTestPort++
+}
+
+function bridgeServerEnv(
+  port: number,
+  statePath: string,
+  extra: Record<string, string | undefined> = {},
+) {
+  return {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TMPDIR: process.env.TMPDIR ?? '/tmp',
+    LANG: process.env.LANG ?? 'C',
+    CODEX_BRIDGE_PORT: String(port),
+    CODEX_BRIDGE_STATE_FILE: statePath,
+    ...extra,
+  }
+}
+
+function spawnServerWithState(
+  statePath: string,
+  port: number,
+  extraEnv: Record<string, string | undefined> = {},
+) {
+  const child = spawn('bun', ['bridge-server.ts'], {
     cwd: process.cwd(),
-    env: {
-      ...process.env,
-      CODEX_BRIDGE_PORT: String(port),
-      CODEX_BRIDGE_STATE_FILE: statePath,
-    },
-    stdio: 'ignore',
+    env: bridgeServerEnv(port, statePath, extraEnv),
+    stdio: ['ignore', 'pipe', 'pipe'],
   })
+  const output: string[] = []
+  processOutput.set(child, output)
+  child.stdout?.on('data', chunk => output.push(String(chunk).trim()))
+  child.stderr?.on('data', chunk => output.push(String(chunk).trim()))
+  child.on('error', error => output.push(`spawn error: ${error.message}`))
+  child.on('exit', (code, signal) => output.push(`exit: code=${code ?? 'null'} signal=${signal ?? 'null'}`))
+  return child
 }
 
 function waitForExit(proc: ChildProcess | ReturnType<typeof spawnServerWithState>) {
+  if (proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve(proc.exitCode)
   return new Promise<number | null>(resolve => proc.once('exit', code => resolve(code)))
 }
 
@@ -23,7 +54,7 @@ let server: ReturnType<typeof spawnServerWithState> | null = null
 let PORT = 0
 let BASE = ''
 
-async function waitForHealth(base: string, timeoutMs = 3000): Promise<void> {
+async function waitForHealth(base: string, timeoutMs = 3000, proc?: ChildProcess): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     try {
@@ -32,23 +63,17 @@ async function waitForHealth(base: string, timeoutMs = 3000): Promise<void> {
     } catch {}
     await Bun.sleep(50)
   }
-  throw new Error('bridge-server did not become ready')
+  const output = proc ? processOutput.get(proc)?.filter(Boolean).join('\n') : ''
+  throw new Error(`bridge-server did not become ready${output ? `\n${output}` : ''}`)
 }
 
 beforeAll(async () => {
-  PORT = 20000 + Math.floor(Math.random() * 40000)
+  PORT = getTestPort()
   BASE = `http://127.0.0.1:${PORT}`
-  server = spawn('bun', ['bridge-server.ts'], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      CODEX_BRIDGE_PORT: String(PORT),
-      CODEX_BRIDGE_STATE_FILE: `/tmp/codex-bridge-state-test-${PORT}.json`,
-    },
-    stdio: 'ignore',
-  })
+  server = spawnServerWithState(`/tmp/codex-bridge-state-test-${PORT}.json`, PORT)
   try {
-    await waitForHealth(BASE)
+    await Bun.sleep(100)
+    await waitForHealth(BASE, 3000, server)
   } catch (e) {
     server.kill()
     throw e
@@ -151,7 +176,7 @@ describe('session token', () => {
 describe('state persistence', () => {
   test('token persists across server restart', async () => {
     const statePath = `/tmp/codex-bridge-state-persist-test-${Date.now()}.json`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
     const s1 = spawnServerWithState(statePath, port)
@@ -183,7 +208,7 @@ describe('state persistence', () => {
 
   test('stale rooms (>1h lastActivity) are skipped on load', async () => {
     const statePath = `/tmp/codex-bridge-state-stale-test-${Date.now()}.json`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
     // Hand-write a state file with lastActivity = 2 hours ago
@@ -216,7 +241,7 @@ describe('state persistence', () => {
 
   test('corrupted state file is quarantined, server starts clean', async () => {
     const statePath = `/tmp/codex-bridge-state-corrupt-test-${Date.now()}.json`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
     writeFileSync(statePath, '{ this is not json', 'utf8')
@@ -238,7 +263,7 @@ describe('state persistence', () => {
 
   test('pendingForCodex queue persists and is drained after restart', async () => {
     const statePath = `/tmp/codex-bridge-state-queue-test-${Date.now()}.json`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
     const s1 = spawnServerWithState(statePath, port)
@@ -277,20 +302,11 @@ describe('state persistence', () => {
 
 describe('message history log', () => {
   test('messages from codex are logged as jsonl', async () => {
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
     const roomId = `LOG-TEST-${Date.now()}`
 
-    const s = spawn('bun', ['bridge-server.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CODEX_BRIDGE_PORT: String(port),
-        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-test-state-${port}.json`,
-        // CODEX_BRIDGE_LOG_DIR unset -> defaults to /tmp
-      },
-      stdio: 'ignore',
-    })
+    const s = spawnServerWithState(`/tmp/bridge-log-test-state-${port}.json`, port)
     try {
       await waitForHealth(base)
       const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
@@ -325,18 +341,10 @@ describe('message history log', () => {
 
   test('proactive and reply messages from claude are logged with distinct kinds', async () => {
     const roomId = `LOG-CLAUDE-${Date.now()}`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
-    const s = spawn('bun', ['bridge-server.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CODEX_BRIDGE_PORT: String(port),
-        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-claude-state-${port}.json`,
-      },
-      stdio: 'ignore',
-    })
+    const s = spawnServerWithState(`/tmp/bridge-log-claude-state-${port}.json`, port)
     try {
       await waitForHealth(base)
       const create = await fetch(`${base}/api/rooms/${roomId}`, { method: 'POST' })
@@ -373,18 +381,10 @@ describe('message history log', () => {
 
   test('codex-backed assistant rooms log codex-peer kinds through the assistant lane', async () => {
     const roomId = `LOG-CODEX-PEER-${Date.now()}`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
-    const s = spawn('bun', ['bridge-server.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CODEX_BRIDGE_PORT: String(port),
-        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-log-codex-peer-state-${port}.json`,
-      },
-      stdio: 'ignore',
-    })
+    const s = spawnServerWithState(`/tmp/bridge-log-codex-peer-state-${port}.json`, port)
     try {
       await waitForHealth(base)
       const create = await fetch(`${base}/api/rooms/${roomId}`, {
@@ -459,18 +459,11 @@ describe('bridge core correctness', () => {
 
   test('long-poll round trip: codex → pending-for-claude → from-claude reply → codex poll resolves', async () => {
     const roomId = `LP-${Date.now()}`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
-    const s = spawn('bun', ['bridge-server.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CODEX_BRIDGE_PORT: String(port),
-        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-core-state-${port}.json`,
-        CODEX_BRIDGE_LOG_DIR: `/tmp`,
-      },
-      stdio: 'ignore',
+    const s = spawnServerWithState(`/tmp/bridge-core-state-${port}.json`, port, {
+      CODEX_BRIDGE_LOG_DIR: '/tmp',
     })
     try {
       await waitForHealth(base)
@@ -525,18 +518,11 @@ describe('bridge core correctness', () => {
 
   test('in-flight dedup: identical messages in quick succession share one reply', async () => {
     const roomId = `DEDUP-${Date.now()}`
-    const port = 30000 + Math.floor(Math.random() * 20000)
+    const port = getTestPort()
     const base = `http://127.0.0.1:${port}`
 
-    const s = spawn('bun', ['bridge-server.ts'], {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CODEX_BRIDGE_PORT: String(port),
-        CODEX_BRIDGE_STATE_FILE: `/tmp/bridge-dedup-state-${port}.json`,
-        CODEX_BRIDGE_LOG_DIR: `/tmp`,
-      },
-      stdio: 'ignore',
+    const s = spawnServerWithState(`/tmp/bridge-dedup-state-${port}.json`, port, {
+      CODEX_BRIDGE_LOG_DIR: '/tmp',
     })
     try {
       await waitForHealth(base)

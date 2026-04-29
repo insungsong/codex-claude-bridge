@@ -122,30 +122,109 @@ type ReplyStatusInfo = {
   peerAlive: boolean
 }
 
+type WorktreeSnapshot = {
+  root: string
+  branch: string
+  head: string
+  statusShort: string
+  diffNameStatus: string
+  diffShortStat: string
+}
+
 const inFlightMessages = new Map<string, Promise<ToolResult>>()
 
 function formatElapsedMs(startMs: number) {
   return `${Math.round((Date.now() - startMs) / 1000)}s`
 }
 
-function formatTimeoutMessage(startMs: number, info?: ReplyStatusInfo) {
+function gitOutput(args: string[], cwd = process.cwd()) {
+  return execFileSync('git', args, { cwd, timeout: 3000 }).toString().trim()
+}
+
+function captureWorktreeSnapshot(): WorktreeSnapshot | null {
+  try {
+    const root = gitOutput(['rev-parse', '--show-toplevel'])
+    return {
+      root,
+      branch: gitOutput(['rev-parse', '--abbrev-ref', 'HEAD'], root),
+      head: gitOutput(['rev-parse', '--short', 'HEAD'], root),
+      statusShort: gitOutput(['status', '--short'], root),
+      diffNameStatus: gitOutput(['diff', '--name-status'], root),
+      diffShortStat: gitOutput(['diff', '--shortstat'], root),
+    }
+  } catch {
+    return null
+  }
+}
+
+function compactMultiline(label: string, text: string) {
+  const lines = text.split('\n').map(line => line.trim()).filter(Boolean)
+  if (lines.length === 0) return `${label}=clean`
+  const shown = lines.slice(0, 8).join('; ')
+  const suffix = lines.length > 8 ? `; ...(+${lines.length - 8})` : ''
+  return `${label}=${shown}${suffix}`
+}
+
+function formatWorktreeEvidence(before: WorktreeSnapshot | null, after: WorktreeSnapshot | null) {
+  if (!before && !after) return ['worktree_evidence=unavailable']
+  if (!before || !after) return ['worktree_evidence=partial']
+
+  const unchanged = before.root === after.root
+    && before.branch === after.branch
+    && before.head === after.head
+    && before.statusShort === after.statusShort
+    && before.diffNameStatus === after.diffNameStatus
+    && before.diffShortStat === after.diffShortStat
+
+  return [
+    `worktree_root=${after.root}`,
+    `worktree_before=${before.branch}@${before.head}`,
+    `worktree_after=${after.branch}@${after.head}`,
+    `worktree_delta=${unchanged ? 'unchanged' : 'changed'}`,
+    compactMultiline('worktree_status', after.statusShort),
+    compactMultiline('worktree_diff', after.diffNameStatus),
+    compactMultiline('worktree_diff_stat', after.diffShortStat),
+  ]
+}
+
+type HandoffCloseReason = 'wait_policy_closed' | 'max_wait_exhausted'
+
+function formatHandoffStatus(info?: ReplyStatusInfo, reason: HandoffCloseReason = 'wait_policy_closed') {
+  if (!info) return 'status_unknown'
+  if (info.status.state === 'queued') return info.peerAlive ? 'queued_not_delivered' : 'queued_peer_inactive'
+  if (info.status.state === 'delivered') return 'delivered_not_claimed'
+  if (info.status.state === 'in_progress') {
+    return reason === 'max_wait_exhausted'
+      ? 'in_progress_wait_window_exhausted'
+      : 'in_progress_no_recent_update'
+  }
+  return 'replied_not_collected'
+}
+
+function formatHandoffNotReadyMessage(
+  id: string,
+  startMs: number,
+  info?: ReplyStatusInfo,
+  reason: HandoffCloseReason = 'wait_policy_closed',
+  beforeSnapshot: WorktreeSnapshot | null = null,
+  afterSnapshot: WorktreeSnapshot | null = null,
+) {
   const elapsed = formatElapsedMs(startMs)
+  const detail = info
+    ? info.status.summary ?? formatReplyProgressStatus(info.status)
+    : 'bridge에서 reply-status를 확인하지 못했습니다.'
 
-  if (info?.peerAlive && info.status.state !== 'replied') {
-    const summary = info.status.summary ?? formatReplyProgressStatus(info.status)
-    return [
-      `Claude 세션은 여전히 연결되어 있고 ${elapsed} 동안 작업 중입니다.`,
-      summary,
-      '같은 본문을 재전송하지 마세요. 잠시 후 `check_claude_messages`로 답변을 확인하거나 진행 상황을 다시 문의하세요.',
-    ].join(' ')
-  }
-
-  if (!info) {
-    return `${elapsed} 동안 Claude로부터 응답이 없었습니다. 같은 본문을 즉시 재전송하지 마세요.`
-  }
-
-  const summary = info.status.summary ?? formatReplyProgressStatus(info.status)
-  return `${elapsed} 동안 Claude가 최종 답변을 내지 않았습니다. ${summary} 같은 본문을 즉시 재전송하지 마세요.`
+  return [
+    'Claude handoff는 등록됐지만 최종 답변은 아직 준비되지 않았습니다.',
+    `handoff_id=${id}`,
+    `elapsed=${elapsed}`,
+    `status=${formatHandoffStatus(info, reason)}`,
+    `peer_alive=${info?.peerAlive ? 'true' : 'false'}`,
+    `detail=${detail}`,
+    ...formatWorktreeEvidence(beforeSnapshot, afterSnapshot),
+    '같은 본문은 재전송하지 마세요. 필요하면 `check_claude_messages`로 이 handoff의 상태나 늦게 도착한 답변만 확인하세요.',
+    'Codex는 로컬 검증을 계속 진행해야 합니다.',
+  ].join('\n')
 }
 
 async function fetchReplyStatus(id: string): Promise<ReplyStatusInfo | null> {
@@ -172,7 +251,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'send_to_claude',
       description: [
         `Send a message to Claude Code through Codex Bridge (room: ${ROOM_ID}) and wait for a reply.`,
-        'This tool blocks until Claude responds (up to about 2 minutes).',
+        'This tool waits in short slices and returns a handoff status instead of encouraging duplicate resend when the final reply is not ready.',
         'For tiny relays or short pings, send the real non-empty message directly instead of doing unrelated preflight checks first.',
         'Use this to collaborate with Claude: ask questions, propose approaches,',
         'debate architecture decisions, or reach consensus on implementation details.',
@@ -222,6 +301,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
         const requestPromise: Promise<ToolResult> = (async () => {
           const startedAt = Date.now()
+          const beforeSnapshot = captureWorktreeSnapshot()
 
           // Send message to bridge
           const sendRes = await bridgeFetch('/from-codex', {
@@ -284,7 +364,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               return {
                 content: [{
                   type: 'text',
-                  text: `${formatElapsedMs(startedAt)} 동안 Claude가 빈 응답을 반환했습니다. 같은 본문을 즉시 재전송하지 마세요.`,
+                  text: [
+                    'Claude handoff는 완료됐지만 빈 응답이 반환됐습니다.',
+                    `handoff_id=${id}`,
+                    `elapsed=${formatElapsedMs(startedAt)}`,
+                    'status=empty_reply',
+                    ...formatWorktreeEvidence(beforeSnapshot, captureWorktreeSnapshot()),
+                    '같은 본문은 재전송하지 말고 `check_claude_messages`로 늦게 도착한 후속 메시지만 확인하세요.',
+                  ].join('\n'),
                 }],
               }
             }
@@ -300,7 +387,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               return {
                 content: [{
                   type: 'text',
-                  text: formatTimeoutMessage(startedAt, replyStatus ?? undefined),
+                  text: formatHandoffNotReadyMessage(
+                    id,
+                    startedAt,
+                    replyStatus ?? undefined,
+                    'wait_policy_closed',
+                    beforeSnapshot,
+                    captureWorktreeSnapshot(),
+                  ),
                 }],
               }
             }
@@ -310,7 +404,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           return {
             content: [{
               type: 'text',
-              text: formatTimeoutMessage(startedAt, replyStatus ?? undefined),
+              text: formatHandoffNotReadyMessage(
+                id,
+                startedAt,
+                replyStatus ?? undefined,
+                'max_wait_exhausted',
+                beforeSnapshot,
+                captureWorktreeSnapshot(),
+              ),
             }],
           }
         })()

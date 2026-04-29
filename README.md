@@ -255,8 +255,9 @@ Use the send_to_claude tool to discuss whether we should use Redis or Memcached 
 Keep going until you reach a decision.
 ```
 
-Codex calls `send_to_claude()` → bridge pushes to the room's assistant side → the assistant replies → bridge returns to Codex.  
-Codex keeps calling `send_to_claude()` until consensus is reached.
+Codex calls `send_to_claude()` → bridge pushes to the room's assistant side → the assistant replies → bridge returns to Codex.
+If the final reply is not ready, `send_to_claude()` returns a handoff status with the message id, progress state, peer liveness, and best-effort worktree evidence instead of encouraging an identical resend.
+Codex keeps calling `send_to_claude()` only when a real follow-up is needed for consensus.
 
 In Claude-backed rooms, the assistant side is the Claude channel plugin.  
 In Codex-backed rooms, the assistant side is a peer `codex app-server` thread with a foreground remote Codex attached to it.
@@ -269,6 +270,7 @@ Do not run unrelated preflight checks first.
 ```
 
 If you need to inspect pending Claude-side proactive messages, use `check_claude_messages()` only after a real handoff has already happened, or when you are explicitly checking the pending queue. It is not a "ping the bridge before first send" step.
+For implementation, verification, or other multi-step work, the assistant side should call `mark_in_progress` within 30 seconds. A request that remains only `delivered` is treated as delivered but unclaimed, not active work.
 
 ---
 
@@ -325,6 +327,7 @@ Codex  →  codex-mcp.ts  →  POST /api/rooms/ENG-1234/from-codex
                          →  claude-mcp.ts  →  POST /api/rooms/ENG-1234/from-claude
                          →  bridge-server resolves Codex's waiting poll
 Codex  ←  send_to_claude() returns Claude's reply
+Codex  ←  or returns handoff_id/status when no final reply is ready
 ```
 
 Codex-backed room:
