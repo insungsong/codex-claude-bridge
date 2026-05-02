@@ -62,6 +62,15 @@ describe('bridge reply progress', () => {
     )
   })
 
+  test('formats status summaries for codex peer rooms', () => {
+    const progress = createReplyProgress(1_000)
+    markReplyDelivered(progress, 2_000)
+
+    expect(formatReplyProgressStatus(progress, 20_000, 'Codex peer')).toBe(
+      'Codex peer received the request 18s ago, but has not reported active progress yet.',
+    )
+  })
+
   test('serializes reply status snapshots for transport', () => {
     const progress = createReplyProgress(1_000)
     markReplyDelivered(progress, 2_000)

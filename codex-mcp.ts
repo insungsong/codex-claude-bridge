@@ -120,6 +120,8 @@ type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean
 type ReplyStatusInfo = {
   status: ReplyProgressSnapshot & { summary?: string }
   peerAlive: boolean
+  assistantLabel?: string
+  assistantName?: string
 }
 
 type WorktreeSnapshot = {
@@ -210,12 +212,13 @@ function formatHandoffNotReadyMessage(
   afterSnapshot: WorktreeSnapshot | null = null,
 ) {
   const elapsed = formatElapsedMs(startMs)
+  const assistantName = info?.assistantName ?? 'Claude'
   const detail = info
-    ? info.status.summary ?? formatReplyProgressStatus(info.status)
+    ? info.status.summary ?? formatReplyProgressStatus(info.status, Date.now(), assistantName)
     : 'bridge에서 reply-status를 확인하지 못했습니다.'
 
   return [
-    'Claude handoff는 등록됐지만 최종 답변은 아직 준비되지 않았습니다.',
+    `${assistantName} handoff는 등록됐지만 최종 답변은 아직 준비되지 않았습니다.`,
     `handoff_id=${id}`,
     `elapsed=${elapsed}`,
     `status=${formatHandoffStatus(info, reason)}`,
@@ -234,10 +237,26 @@ async function fetchReplyStatus(id: string): Promise<ReplyStatusInfo | null> {
   const data = await res.json() as {
     found: boolean
     peerAlive?: boolean
+    assistantLabel?: string
+    assistantName?: string
     status?: ReplyProgressSnapshot & { summary?: string }
   }
   if (!data.found || !data.status) return null
-  return { status: data.status, peerAlive: data.peerAlive ?? false }
+  return {
+    status: data.status,
+    peerAlive: data.peerAlive ?? false,
+    assistantLabel: data.assistantLabel,
+    assistantName: data.assistantName,
+  }
+}
+
+async function ackReply(id: string): Promise<void> {
+  try {
+    const res = await bridgeFetch(`/ack-reply/${id}`, { method: 'POST' })
+    if (res.status === 401) {
+      process.stderr.write('[codex-mcp] send_to_claude/ack-reply returned 401; ignoring optional ack failure\n')
+    }
+  } catch {}
 }
 
 const mcp = new Server(
@@ -357,6 +376,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             const result = await pollRes.json() as { timeout: boolean; reply: string | null }
 
             if (result.reply) {
+              await ackReply(id)
               return { content: [{ type: 'text', text: result.reply }] }
             }
 
@@ -435,26 +455,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             isError: true,
           }
         }
-        const {
-          messages,
-          statuses = [],
-        } = await res.json() as {
+        const payload = await res.json() as {
           messages: { id: string; text: string }[]
           statuses?: Array<ReplyProgressSnapshot & { summary?: string }>
+          assistantName?: string
         }
+        const messages = payload.messages
+        const statuses = payload.statuses ?? []
+        const assistantName = payload.assistantName ?? 'Claude'
         if (messages.length === 0 && statuses.length === 0) {
-          return { content: [{ type: 'text', text: 'No pending messages from Claude.' }] }
+          return { content: [{ type: 'text', text: `No pending messages from ${assistantName}.` }] }
         }
         const sections: string[] = []
         if (messages.length > 0) {
           const formattedMessages = messages.map(m => `[${m.id}] ${m.text}`).join('\n\n---\n\n')
-          sections.push(`${messages.length} message(s) from Claude:\n\n${formattedMessages}`)
+          sections.push(`${messages.length} message(s) from ${assistantName}:\n\n${formattedMessages}`)
         }
         if (statuses.length > 0) {
           const formattedStatuses = statuses
-            .map(status => `[${status.id}] ${status.summary ?? formatReplyProgressStatus(status)}`)
+            .map(status => `[${status.id}] ${status.summary ?? formatReplyProgressStatus(status, Date.now(), assistantName)}`)
             .join('\n\n---\n\n')
-          sections.push(`Active Claude work:\n\n${formattedStatuses}`)
+          sections.push(`Active ${assistantName} work:\n\n${formattedStatuses}`)
         }
         return { content: [{ type: 'text', text: sections.join('\n\n===\n\n') }] }
       }

@@ -69,6 +69,7 @@ type PendingReply = {
   normalizedMessage?: string
   progress: ReplyProgress
   reply?: string
+  replyDeliveredAt?: number
   waiters: Set<ReplyWaiter>
 }
 
@@ -111,6 +112,7 @@ type SerializedPendingReply = {
   normalizedMessage?: string
   progress?: ReplyProgress
   reply?: string
+  replyDeliveredAt?: number
 }
 
 type SerializedRoom = {
@@ -143,6 +145,10 @@ function isCodexConnected(room: RoomState) {
 
 function assistantLaneLabel(room: Pick<RoomState, 'assistantType'>) {
   return room.assistantType === 'codex' ? 'codex-peer' : 'claude'
+}
+
+function assistantReplyName(room: Pick<RoomState, 'assistantType'>) {
+  return room.assistantType === 'codex' ? 'Codex peer' : 'Claude'
 }
 
 function parseAssistantType(value: unknown): AssistantType | null {
@@ -234,6 +240,7 @@ function serializeRoom(room: RoomState): SerializedRoom {
       normalizedMessage: pending.normalizedMessage,
       progress: pending.progress,
       reply: pending.reply,
+      replyDeliveredAt: pending.replyDeliveredAt,
     })
   }
   return {
@@ -311,6 +318,7 @@ function loadState(): void {
         normalizedMessage: sp.normalizedMessage,
         progress,
         reply: sp.reply,
+        replyDeliveredAt: sp.replyDeliveredAt,
         waiters: new Set(),
       })
     }
@@ -392,6 +400,7 @@ function broadcast(room: RoomState, m: Wire) {
 // ── Reply routing (Codex waits for Claude) ──
 
 const MAX_PENDING_REPLY_MS = 10 * 60 * 1000
+const REPLIED_PENDING_REPLY_GRACE_MS = 2 * 60 * 1000
 
 function dropPendingReply(room: RoomState, msgId: string) {
   const pending = room.pendingReplies.get(msgId)
@@ -429,6 +438,14 @@ function markDeliveredMessages(room: RoomState, messages: Array<{ id: string; se
 function pruneExpiredPendingReplies(room: RoomState) {
   const now = Date.now()
   for (const [msgId, pending] of room.pendingReplies) {
+    if (
+      pending.reply !== undefined &&
+      pending.replyDeliveredAt !== undefined &&
+      now - pending.replyDeliveredAt > REPLIED_PENDING_REPLY_GRACE_MS
+    ) {
+      dropPendingReply(room, msgId)
+      continue
+    }
     if (now - pending.createdAt > MAX_PENDING_REPLY_MS) dropPendingReply(room, msgId)
   }
 }
@@ -439,12 +456,16 @@ function resolveCodexReply(room: RoomState, replyToId: string | undefined, text:
   if (!pending || pending.reply !== undefined) return
   pending.reply = text
   markReplyCompleted(pending.progress)
-  schedulePersist()
   if (pending.waiters.size > 0) {
     const waiters = Array.from(pending.waiters)
-    dropPendingReply(room, replyToId)
+    pending.waiters.clear()
+    pending.replyDeliveredAt = Date.now()
+    schedulePersist()
+    for (const w of waiters) w.cleanup()
     for (const w of waiters) w.resolve(Response.json({ timeout: false, reply: text }))
+    return
   }
+  schedulePersist()
 }
 
 function drainLateRepliesForCodex(room: RoomState) {
@@ -781,9 +802,11 @@ Bun.serve({
 
         return Response.json({
           ok: true,
+          assistantLabel: assistantLaneLabel(room),
+          assistantName: assistantReplyName(room),
           status: {
             ...serializeReplyProgress(progressMatch[1], pending.progress),
-            summary: formatReplyProgressStatus(pending.progress),
+            summary: formatReplyProgressStatus(pending.progress, Date.now(), assistantReplyName(room)),
           },
         })
       })()
@@ -803,11 +826,31 @@ Bun.serve({
       return Response.json({
         found: true,
         peerAlive: isAssistantConnected(room),
+        assistantLabel: assistantLaneLabel(room),
+        assistantName: assistantReplyName(room),
         status: {
           ...serializeReplyProgress(statusMatch[1], pending.progress),
-          summary: formatReplyProgressStatus(pending.progress),
+          summary: formatReplyProgressStatus(pending.progress, Date.now(), assistantReplyName(room)),
         },
       })
+    }
+
+    // POST /api/rooms/:roomId/ack-reply/:id — Codex confirms it received a reply
+    const ackMatch = sub.match(/^ack-reply\/(.+)$/)
+    if (ackMatch && req.method === 'POST') {
+      const room = rooms.get(roomId)
+      if (!room) return Response.json({ error: 'room not found' }, { status: 404 })
+      const authFail = checkToken(req, room)
+      if (authFail) return authFail
+      touchRoom(room)
+
+      const pending = room.pendingReplies.get(ackMatch[1])
+      if (!pending || pending.reply === undefined) {
+        return Response.json({ ok: true, acknowledged: false })
+      }
+
+      dropPendingReply(room, ackMatch[1])
+      return Response.json({ ok: true, acknowledged: true })
     }
 
     // GET /api/rooms/:roomId/poll-reply/:id — Codex long-polls for Claude's reply
@@ -866,9 +909,14 @@ Bun.serve({
       const messages = [...room.pendingForCodex.splice(0), ...drainLateRepliesForCodex(room)]
       const statuses = listActiveReplyStatuses(room).map(status => ({
         ...status,
-        summary: formatReplyProgressStatus(status),
+        summary: formatReplyProgressStatus(status, Date.now(), assistantReplyName(room)),
       }))
-      return Response.json({ messages, statuses })
+      return Response.json({
+        messages,
+        statuses,
+        assistantLabel: assistantLaneLabel(room),
+        assistantName: assistantReplyName(room),
+      })
     }
 
     // POST /api/rooms/:roomId/upload — file upload from web UI

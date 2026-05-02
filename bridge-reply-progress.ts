@@ -50,17 +50,21 @@ export function markReplyCompleted(progress: ReplyProgress, now = Date.now()) {
   progress.lastProgressAt ??= now
 }
 
-export function formatReplyProgressStatus(progress: ReplyProgress, now = Date.now()) {
+export function formatReplyProgressStatus(
+  progress: ReplyProgress,
+  now = Date.now(),
+  assistantName = 'Claude',
+) {
   switch (progress.state) {
     case 'queued':
-      return 'The bridge has not observed Claude receive or claim the request yet.'
+      return `The bridge has not observed ${assistantName} receive or claim the request yet.`
     case 'delivered':
       if (progress.deliveredAt) {
-        return `Claude received the request ${formatAge(now, progress.deliveredAt)} ago, but has not reported active progress yet.`
+        return `${assistantName} received the request ${formatAge(now, progress.deliveredAt)} ago, but has not reported active progress yet.`
       }
-      return 'Claude received the request, but has not reported active progress yet.'
+      return `${assistantName} received the request, but has not reported active progress yet.`
     case 'in_progress': {
-      const parts = ['Claude is still working on the request']
+      const parts = [`${assistantName} is still working on the request`]
       if (progress.lastProgressAt) {
         parts.push(`last progress ${formatAge(now, progress.lastProgressAt)} ago`)
       }
@@ -73,9 +77,9 @@ export function formatReplyProgressStatus(progress: ReplyProgress, now = Date.no
     }
     case 'replied':
       if (progress.repliedAt) {
-        return `Claude finished preparing a reply ${formatAge(now, progress.repliedAt)} ago.`
+        return `${assistantName} finished preparing a reply ${formatAge(now, progress.repliedAt)} ago.`
       }
-      return 'Claude finished preparing a reply.'
+      return `${assistantName} finished preparing a reply.`
   }
 }
 

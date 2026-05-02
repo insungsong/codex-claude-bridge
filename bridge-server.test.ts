@@ -516,6 +516,129 @@ describe('bridge core correctness', () => {
     }
   }, 15000)
 
+  test('late reply remains recoverable after resolving an active long-poll waiter', async () => {
+    const roomId = `LP-RECOVER-${Date.now()}`
+    const port = getTestPort()
+    const base = `http://127.0.0.1:${port}`
+
+    const s = spawnServerWithState(`/tmp/bridge-recover-state-${port}.json`, port, {
+      CODEX_BRIDGE_LOG_DIR: '/tmp',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assistantType: 'codex' }),
+      })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+
+      const headers = { 'content-type': 'application/json', 'x-bridge-token': sessionToken }
+      const send = await fetch(`${base}/api/rooms/${roomId}/from-codex`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ message: 'recoverable question' }),
+      })
+      const { id: msgId } = await send.json() as { id: string }
+
+      await fetch(`${base}/api/rooms/${roomId}/pending-for-claude?timeout=2000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+
+      const pollPromise = fetch(`${base}/api/rooms/${roomId}/poll-reply/${msgId}?timeout=5000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ text: 'recoverable answer', replyTo: msgId, proactive: false }),
+      })
+
+      const pollRes = await pollPromise
+      expect(pollRes.status).toBe(200)
+      const pollBody = await pollRes.json() as { timeout: boolean; reply: string | null }
+      expect(pollBody.timeout).toBe(false)
+      expect(pollBody.reply).toBe('recoverable answer')
+
+      const recover = await fetch(`${base}/api/rooms/${roomId}/pending-for-codex`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      expect(recover.status).toBe(200)
+      const { messages, assistantName } = await recover.json() as {
+        messages: { id: string; text: string }[]
+        assistantName?: string
+      }
+      expect(assistantName).toBe('Codex peer')
+      expect(messages).toContainEqual({ id: msgId, text: 'recoverable answer' })
+    } finally {
+      s.kill()
+      await waitForExit(s)
+      try { unlinkSync(`/tmp/bridge-recover-state-${port}.json`) } catch {}
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+    }
+  }, 15000)
+
+  test('ack-reply clears waiter-delivered replies after successful collection', async () => {
+    const roomId = `LP-ACK-${Date.now()}`
+    const port = getTestPort()
+    const base = `http://127.0.0.1:${port}`
+
+    const s = spawnServerWithState(`/tmp/bridge-ack-state-${port}.json`, port, {
+      CODEX_BRIDGE_LOG_DIR: '/tmp',
+    })
+    try {
+      await waitForHealth(base)
+      const create = await fetch(`${base}/api/rooms/${roomId}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ assistantType: 'codex' }),
+      })
+      const { sessionToken } = await create.json() as { sessionToken: string }
+      const headers = { 'content-type': 'application/json', 'x-bridge-token': sessionToken }
+
+      const send = await fetch(`${base}/api/rooms/${roomId}/from-codex`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ message: 'ack question' }),
+      })
+      const { id: msgId } = await send.json() as { id: string }
+
+      await fetch(`${base}/api/rooms/${roomId}/pending-for-claude?timeout=2000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+
+      const pollPromise = fetch(`${base}/api/rooms/${roomId}/poll-reply/${msgId}?timeout=5000`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      await fetch(`${base}/api/rooms/${roomId}/from-claude`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ text: 'ack answer', replyTo: msgId, proactive: false }),
+      })
+
+      const pollBody = await (await pollPromise).json() as { timeout: boolean; reply: string | null }
+      expect(pollBody).toEqual({ timeout: false, reply: 'ack answer' })
+
+      const ack = await fetch(`${base}/api/rooms/${roomId}/ack-reply/${msgId}`, {
+        method: 'POST',
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      expect(await ack.json()).toEqual({ ok: true, acknowledged: true })
+
+      const recover = await fetch(`${base}/api/rooms/${roomId}/pending-for-codex`, {
+        headers: { 'x-bridge-token': sessionToken },
+      })
+      const { messages } = await recover.json() as { messages: { id: string; text: string }[] }
+      expect(messages).toEqual([])
+    } finally {
+      s.kill()
+      await waitForExit(s)
+      try { unlinkSync(`/tmp/bridge-ack-state-${port}.json`) } catch {}
+      try { unlinkSync(`/tmp/bridge-${roomId}.jsonl`) } catch {}
+    }
+  }, 15000)
+
   test('in-flight dedup: identical messages in quick succession share one reply', async () => {
     const roomId = `DEDUP-${Date.now()}`
     const port = getTestPort()
