@@ -1,8 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  applyThreadLifecycleEvent,
+  buildPeerReadyPrompt,
+  buildThreadStartRequest,
   buildCodexAppServerArgs,
   buildCodexRemoteLaunchArgs,
+  CodexPeerBridge,
   buildInitializeRequest,
   buildThreadResumeRequest,
   buildTurnStartRequest,
@@ -30,7 +34,7 @@ describe('codex peer app-server bridge', () => {
       '-c', 'mcp_servers.omx_code_intel.enabled=false',
       '-c', 'mcp_servers.omx_trace.enabled=false',
       '-m', 'gpt-5.4',
-      'Bridge peer online for room test2. Briefly acknowledge readiness, then wait for further requests from this thread.',
+      'Bridge peer online for room test2. 첫 응답으로 정확히 "test2 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요.',
     ])
   })
 
@@ -104,6 +108,17 @@ describe('codex peer app-server bridge', () => {
         }],
       },
     })
+
+    expect(buildThreadStartRequest({
+      id: 4,
+      workingDirectory: '/tmp/workdir',
+    })).toEqual({
+      id: 4,
+      method: 'thread/start',
+      params: {
+        cwd: '/tmp/workdir',
+      },
+    })
   })
 
   test('prefers final_answer agent messages and falls back to the latest completed text', () => {
@@ -120,5 +135,167 @@ describe('codex peer app-server bridge', () => {
     expect(selectTurnReply([
       { type: 'commandExecution', aggregatedOutput: 'ignored' },
     ])).toBeNull()
+  })
+
+  test('stages a replacement thread when a new peer thread starts before the old one closes', () => {
+    const started = applyThreadLifecycleEvent({
+      activeThreadId: 'thr-old',
+      activeThreadPath: '/tmp/old.jsonl',
+      stagedThreadId: '',
+      stagedThreadPath: '',
+    }, {
+      type: 'started',
+      threadId: 'thr-new',
+      threadPath: '/tmp/new.jsonl',
+    })
+
+    expect(started.effect).toBe('stage-replacement')
+    expect(started.state).toEqual({
+      activeThreadId: 'thr-old',
+      activeThreadPath: '/tmp/old.jsonl',
+      stagedThreadId: 'thr-new',
+      stagedThreadPath: '/tmp/new.jsonl',
+    })
+
+    const closed = applyThreadLifecycleEvent(started.state, {
+      type: 'closed',
+      threadId: 'thr-old',
+    })
+
+    expect(closed.effect).toBe('promote-staged')
+    expect(closed.state).toEqual({
+      activeThreadId: 'thr-new',
+      activeThreadPath: '/tmp/new.jsonl',
+      stagedThreadId: '',
+      stagedThreadPath: '',
+    })
+  })
+
+  test('clears the active thread when it closes without a staged replacement', () => {
+    const closed = applyThreadLifecycleEvent({
+      activeThreadId: 'thr-only',
+      activeThreadPath: '/tmp/only.jsonl',
+      stagedThreadId: '',
+      stagedThreadPath: '',
+    }, {
+      type: 'closed',
+      threadId: 'thr-only',
+    })
+
+    expect(closed.effect).toBe('clear-active')
+    expect(closed.state).toEqual({
+      activeThreadId: '',
+      activeThreadPath: '',
+      stagedThreadId: '',
+      stagedThreadPath: '',
+    })
+  })
+
+  test('recovers by starting a fresh thread when queued bridge work arrives after the active thread was cleared', async () => {
+    const rpcRequests: Array<{ method: string; params: unknown }> = []
+    const expectedWorkingDirectory = process.env.CODEX_BRIDGE_WORKDIR ?? process.cwd()
+    const bridge = new CodexPeerBridge({
+      roomId: 'ALL-RECOVER',
+      bridgeToken: 'token',
+      base: 'http://localhost:8788',
+    }, async () => new Response(null, { status: 204 })) as any
+
+    bridge.rpc = {
+      request: async (method: string, params: unknown) => {
+        rpcRequests.push({ method, params })
+        if (method === 'thread/start') {
+          return {
+            thread: {
+              id: 'thr-recovered',
+              path: '/tmp/recovered.jsonl',
+            },
+          }
+        }
+        if (method === 'turn/start') {
+          return { turn: { id: 'turn-1' } }
+        }
+        throw new Error(`unexpected rpc method: ${method}`)
+      },
+    }
+    bridge.waitForBridgeTurnReply = async () => 'Recovered reply'
+    bridge.sendReply = async () => {}
+
+    bridge.bridgeQueue = [{ id: 'msg-1', text: 'resume work', sender: 'codex' }]
+    bridge.threadId = ''
+    bridge.threadPath = ''
+    bridge.threadBusy = false
+    bridge.bridgeProcessing = false
+
+    await bridge.processBridgeQueue()
+
+    expect(rpcRequests).toEqual([
+      {
+        method: 'thread/start',
+        params: {
+          cwd: expectedWorkingDirectory,
+        },
+      },
+      {
+        method: 'turn/start',
+        params: {
+          threadId: 'thr-recovered',
+          input: [{
+            type: 'text',
+            text: 'resume work',
+            text_elements: [],
+          }],
+        },
+      },
+    ])
+    expect(bridge.threadId).toBe('thr-recovered')
+    expect(bridge.threadPath).toBe('/tmp/recovered.jsonl')
+  })
+
+  test('adopts a peer-started replacement thread immediately when the bridge is idle and seeds the standby turn', async () => {
+    const rpcRequests: Array<{ method: string; params: unknown }> = []
+    const bridge = new CodexPeerBridge({
+      roomId: 'ALL-4',
+      bridgeToken: 'token',
+      base: 'http://localhost:8788',
+    }, async () => new Response(null, { status: 204 })) as any
+
+    bridge.rpc = {
+      request: async (method: string, params: unknown) => {
+        rpcRequests.push({ method, params })
+        if (method === 'turn/start') return { turn: { id: 'system-turn-1' } }
+        throw new Error(`unexpected rpc method: ${method}`)
+      },
+    }
+    bridge.threadId = 'thr-old'
+    bridge.threadPath = '/tmp/old.jsonl'
+    bridge.threadBusy = false
+
+    await bridge.handleNotification({
+      method: 'thread/started',
+      params: {
+        thread: {
+          id: 'thr-new',
+          path: '/tmp/new.jsonl',
+        },
+      },
+    })
+
+    expect(bridge.threadId).toBe('thr-new')
+    expect(bridge.threadPath).toBe('/tmp/new.jsonl')
+    expect(bridge.stagedThreadId).toBe('')
+    expect(rpcRequests).toEqual([
+      {
+        method: 'turn/start',
+        params: {
+          threadId: 'thr-new',
+          input: [{
+            type: 'text',
+            text: buildPeerReadyPrompt('ALL-4'),
+            text_elements: [],
+          }],
+        },
+      },
+    ])
+    expect(bridge.trackedTurns.get('system-turn-1')?.source).toBe('system')
   })
 })

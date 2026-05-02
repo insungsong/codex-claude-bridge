@@ -108,6 +108,14 @@ type TurnStartRequest = {
   }
 }
 
+type ThreadStartRequest = {
+  id: number
+  method: 'thread/start'
+  params: {
+    cwd: string
+  }
+}
+
 type ThreadResumeRequest = {
   id: number
   method: 'thread/resume'
@@ -132,11 +140,26 @@ type CompletedTurnItem =
     }
 
 type TrackedTurn = {
-  source: 'bridge' | 'peer' | 'unknown'
+  source: 'bridge' | 'peer' | 'system' | 'unknown'
   bridgeMessageId?: string
   items: CompletedTurnItem[]
   resolved: boolean
   waiters: Array<(reply: string | null) => void>
+}
+
+type AppServerThread = {
+  id: string
+  path?: string | null
+}
+
+type ThreadStartedNotificationParams = {
+  thread?: AppServerThread
+}
+
+type TurnStartedNotificationParams = {
+  turn?: {
+    id?: string
+  }
 }
 
 export function buildCodexRemoteLaunchArgs(options: {
@@ -147,7 +170,7 @@ export function buildCodexRemoteLaunchArgs(options: {
     '--remote', options.wsUrl,
     ...PEER_CONFIG_OVERRIDES,
     '-m', process.env.CODEX_BRIDGE_PEER_MODEL ?? 'gpt-5.4',
-    `Bridge peer online for room ${options.roomId}. Briefly acknowledge readiness, then wait for further requests from this thread.`,
+    buildPeerReadyPrompt(options.roomId),
   ]
 }
 
@@ -199,6 +222,19 @@ export function buildTurnStartRequest(options: {
   }
 }
 
+export function buildThreadStartRequest(options: {
+  id: number
+  workingDirectory: string
+}): ThreadStartRequest {
+  return {
+    id: options.id,
+    method: 'thread/start',
+    params: {
+      cwd: options.workingDirectory,
+    },
+  }
+}
+
 export function buildThreadResumeRequest(options: {
   id: number
   threadId: string
@@ -215,18 +251,26 @@ export function buildThreadResumeRequest(options: {
   }
 }
 
+function isCompletedAgentMessage(item: CompletedTurnItem): item is CompletedAgentMessage {
+  return item.type === 'agentMessage'
+}
+
+export function buildPeerReadyPrompt(roomId: string) {
+  return `Bridge peer online for room ${roomId}. 첫 응답으로 정확히 "${roomId} 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요.`
+}
+
 export function selectTurnReply(items: CompletedTurnItem[]) {
   const finalAnswer = [...items]
     .reverse()
-    .find(item => item.type === 'agentMessage' && item.phase === 'final_answer')
-  if (finalAnswer && finalAnswer.type === 'agentMessage' && finalAnswer.text.trim()) {
+    .find((item): item is CompletedAgentMessage => isCompletedAgentMessage(item) && item.phase === 'final_answer')
+  if (finalAnswer && finalAnswer.text.trim()) {
     return finalAnswer.text
   }
 
   const latestAgentMessage = [...items]
     .reverse()
-    .find(item => item.type === 'agentMessage' && item.text.trim())
-  if (latestAgentMessage && latestAgentMessage.type === 'agentMessage') {
+    .find((item): item is CompletedAgentMessage => isCompletedAgentMessage(item) && item.text.trim().length > 0)
+  if (latestAgentMessage) {
     return latestAgentMessage.text
   }
 
@@ -392,15 +436,125 @@ class JsonRpcWebSocketClient {
   }
 }
 
-class CodexPeerBridge {
+export type PeerThreadLifecycleState = {
+  activeThreadId: string
+  activeThreadPath: string
+  stagedThreadId: string
+  stagedThreadPath: string
+}
+
+export type PeerThreadLifecycleEvent =
+  | {
+      type: 'started'
+      threadId: string
+      threadPath: string
+    }
+  | {
+      type: 'closed'
+      threadId: string
+    }
+
+export type PeerThreadLifecycleEffect =
+  | 'ignore'
+  | 'adopt-active'
+  | 'refresh-active'
+  | 'stage-replacement'
+  | 'promote-staged'
+  | 'clear-active'
+  | 'drop-staged'
+
+export function applyThreadLifecycleEvent(
+  state: PeerThreadLifecycleState,
+  event: PeerThreadLifecycleEvent,
+): { state: PeerThreadLifecycleState; effect: PeerThreadLifecycleEffect } {
+  if (!event.threadId) return { state, effect: 'ignore' }
+
+  if (event.type === 'started') {
+    if (!state.activeThreadId) {
+      return {
+        effect: 'adopt-active',
+        state: {
+          activeThreadId: event.threadId,
+          activeThreadPath: event.threadPath,
+          stagedThreadId: '',
+          stagedThreadPath: '',
+        },
+      }
+    }
+
+    if (event.threadId === state.activeThreadId) {
+      if (event.threadPath && event.threadPath !== state.activeThreadPath) {
+        return {
+          effect: 'refresh-active',
+          state: {
+            ...state,
+            activeThreadPath: event.threadPath,
+          },
+        }
+      }
+      return { state, effect: 'ignore' }
+    }
+
+    return {
+      effect: 'stage-replacement',
+      state: {
+        ...state,
+        stagedThreadId: event.threadId,
+        stagedThreadPath: event.threadPath,
+      },
+    }
+  }
+
+  if (event.threadId === state.activeThreadId) {
+    if (state.stagedThreadId) {
+      return {
+        effect: 'promote-staged',
+        state: {
+          activeThreadId: state.stagedThreadId,
+          activeThreadPath: state.stagedThreadPath,
+          stagedThreadId: '',
+          stagedThreadPath: '',
+        },
+      }
+    }
+
+    return {
+      effect: 'clear-active',
+      state: {
+        activeThreadId: '',
+        activeThreadPath: '',
+        stagedThreadId: '',
+        stagedThreadPath: '',
+      },
+    }
+  }
+
+  if (event.threadId === state.stagedThreadId) {
+    return {
+      effect: 'drop-staged',
+      state: {
+        ...state,
+        stagedThreadId: '',
+        stagedThreadPath: '',
+      },
+    }
+  }
+
+  return { state, effect: 'ignore' }
+}
+
+export class CodexPeerBridge {
   private rpc = new JsonRpcWebSocketClient()
   private appServerProc: Bun.Subprocess | null = null
   private wsUrl = ''
   private threadId = ''
   private threadPath = ''
+  private stagedThreadId = ''
+  private stagedThreadPath = ''
   private threadBusy = false
   private bridgeQueue: BridgeMessage[] = []
   private bridgeProcessing = false
+  private threadRecoveryPromise: Promise<boolean> | null = null
   private trackedTurns = new Map<string, TrackedTurn>()
   private bridgeStartedTurns = new Set<string>()
   private proactiveForwardedTurns = new Set<string>()
@@ -424,6 +578,88 @@ class CodexPeerBridge {
   private writeLaunchFile() {
     if (!LAUNCH_FILE) return
     writeFileSync(LAUNCH_FILE, `WS_URL=${this.wsUrl}\nTHREAD_ID=${this.threadId}\n`, 'utf8')
+  }
+
+  private getThreadLifecycleState(): PeerThreadLifecycleState {
+    return {
+      activeThreadId: this.threadId,
+      activeThreadPath: this.threadPath,
+      stagedThreadId: this.stagedThreadId,
+      stagedThreadPath: this.stagedThreadPath,
+    }
+  }
+
+  private setThreadLifecycleState(state: PeerThreadLifecycleState) {
+    this.threadId = state.activeThreadId
+    this.threadPath = state.activeThreadPath
+    this.stagedThreadId = state.stagedThreadId
+    this.stagedThreadPath = state.stagedThreadPath
+  }
+
+  private adoptActiveThread(thread: AppServerThread, reason: string) {
+    const threadId = String(thread.id ?? '')
+    if (!threadId) throw new Error(`missing thread id while ${reason}`)
+    this.setThreadLifecycleState({
+      activeThreadId: threadId,
+      activeThreadPath: String(thread.path ?? ''),
+      stagedThreadId: '',
+      stagedThreadPath: '',
+    })
+    this.writeLaunchFile()
+    logPeer(`${reason} ${threadId}`)
+  }
+
+  private hasActiveBridgeTurn() {
+    if (this.bridgeStartedTurns.size > 0) return true
+    for (const tracked of this.trackedTurns.values()) {
+      if (tracked.source === 'bridge' && !tracked.resolved) return true
+    }
+    return false
+  }
+
+  private async ensureActiveThread() {
+    if (this.threadId) return true
+    if (this.threadRecoveryPromise) return await this.threadRecoveryPromise
+
+    this.threadRecoveryPromise = (async () => {
+      try {
+        const response = await this.rpc.request<{ thread: AppServerThread }>(
+          'thread/start',
+          buildThreadStartRequest({
+            id: 2,
+            workingDirectory: WORKDIR,
+          }).params,
+        )
+        this.adoptActiveThread(response.thread, 'started replacement peer thread')
+        return true
+      } catch (error) {
+        logPeer(`failed to start replacement peer thread: ${error instanceof Error ? error.message : String(error)}`)
+        return false
+      } finally {
+        this.threadRecoveryPromise = null
+      }
+    })()
+
+    return await this.threadRecoveryPromise
+  }
+
+  private shouldAdoptPeerStartedThreadImmediately() {
+    return !this.threadBusy && !this.hasActiveBridgeTurn()
+  }
+
+  private async seedPeerReadyTurn(threadId: string) {
+    const response = await this.rpc.request<{ turn: { id: string } }>(
+      'turn/start',
+      buildTurnStartRequest({
+        id: 4,
+        threadId,
+        message: buildPeerReadyPrompt(this.config.roomId),
+      }).params,
+    )
+
+    const tracked = this.getOrCreateTrackedTurn(response.turn.id)
+    tracked.source = 'system'
+    logPeer(`seeded peer standby turn on ${threadId}`)
   }
 
   private async startAppServer() {
@@ -509,16 +745,45 @@ class CodexPeerBridge {
   private async handleNotification(notification: AppServerNotification) {
     switch (notification.method) {
       case 'thread/started': {
-        const threadId = String(notification.params?.thread?.id ?? '')
-        const threadPath = String(notification.params?.thread?.path ?? '')
+        const params = notification.params as ThreadStartedNotificationParams | undefined
+        const threadId = String(params?.thread?.id ?? '')
+        const threadPath = String(params?.thread?.path ?? '')
         if (!threadId) return
-        if (!this.threadId) {
-          this.threadId = threadId
-          this.threadPath = threadPath
+
+        if (this.threadId && threadId !== this.threadId && this.shouldAdoptPeerStartedThreadImmediately()) {
+          this.adoptActiveThread(
+            { id: threadId, path: threadPath },
+            'adopted replacement peer thread',
+          )
+          await this.seedPeerReadyTurn(threadId)
+          void this.processBridgeQueue()
+          return
+        }
+
+        const previous = this.getThreadLifecycleState()
+        const lifecycle = applyThreadLifecycleEvent(previous, {
+          type: 'started',
+          threadId,
+          threadPath,
+        })
+        this.setThreadLifecycleState(lifecycle.state)
+
+        if (lifecycle.effect === 'adopt-active') {
           this.writeLaunchFile()
           logPeer(`adopted peer-owned thread ${threadId}`)
           void this.processBridgeQueue()
+          return
         }
+
+        if (lifecycle.effect === 'refresh-active') {
+          this.writeLaunchFile()
+          return
+        }
+
+        if (lifecycle.effect === 'stage-replacement') {
+          logPeer(`staged replacement peer thread ${threadId}`)
+        }
+
         return
       }
 
@@ -532,7 +797,8 @@ class CodexPeerBridge {
       }
 
       case 'turn/started': {
-        const turnId = String(notification.params?.turn?.id ?? '')
+        const params = notification.params as TurnStartedNotificationParams | undefined
+        const turnId = String(params?.turn?.id ?? '')
         if (!turnId) return
         this.getOrCreateTrackedTurn(turnId)
         return
@@ -577,6 +843,10 @@ class CodexPeerBridge {
           return
         }
 
+        if (tracked.source === 'system') {
+          return
+        }
+
         if (!this.proactiveForwardedTurns.has(turnId) && reply?.trim()) {
           this.proactiveForwardedTurns.add(turnId)
           await this.sendProactive(reply)
@@ -586,13 +856,34 @@ class CodexPeerBridge {
 
       case 'thread/closed': {
         const threadId = String(notification.params?.threadId ?? '')
-        if (threadId && threadId === this.threadId) {
-          this.threadId = ''
-          this.threadPath = ''
+        if (!threadId) return
+
+        const previous = this.getThreadLifecycleState()
+        const lifecycle = applyThreadLifecycleEvent(previous, {
+          type: 'closed',
+          threadId,
+        })
+        this.setThreadLifecycleState(lifecycle.state)
+
+        if (lifecycle.effect === 'promote-staged') {
+          this.threadBusy = false
+          this.writeLaunchFile()
+          logPeer(`peer thread ${threadId} closed; promoted replacement ${this.threadId}`)
+          void this.processBridgeQueue()
+          return
+        }
+
+        if (lifecycle.effect === 'clear-active') {
           this.threadBusy = false
           this.writeLaunchFile()
           logPeer(`peer thread ${threadId} closed`)
+          return
         }
+
+        if (lifecycle.effect === 'drop-staged') {
+          logPeer(`dropped staged replacement thread ${threadId}`)
+        }
+
         return
       }
 
@@ -607,17 +898,26 @@ class CodexPeerBridge {
   }
 
   private async processBridgeQueue() {
-    if (this.bridgeProcessing || this.threadBusy || this.bridgeQueue.length === 0 || !this.threadId) return
-    this.bridgeProcessing = true
-
-    while (this.bridgeQueue.length > 0) {
-      if (this.threadBusy) break
-      const message = this.bridgeQueue.shift()
-      if (!message) continue
-      await this.handleBridgeMessage(message)
+    if (this.bridgeProcessing || this.threadBusy || this.bridgeQueue.length === 0) return
+    if (!this.threadId) {
+      const recovered = await this.ensureActiveThread()
+      if (!recovered || !this.threadId) return
     }
-
-    this.bridgeProcessing = false
+    this.bridgeProcessing = true
+    try {
+      while (this.bridgeQueue.length > 0) {
+        if (this.threadBusy) break
+        if (!this.threadId) {
+          const recovered = await this.ensureActiveThread()
+          if (!recovered || !this.threadId) break
+        }
+        const message = this.bridgeQueue.shift()
+        if (!message) continue
+        await this.handleBridgeMessage(message)
+      }
+    } finally {
+      this.bridgeProcessing = false
+    }
   }
 
   private async handleBridgeMessage(message: BridgeMessage) {

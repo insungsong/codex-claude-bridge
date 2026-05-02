@@ -88,4 +88,4 @@ exec codex \
   -c 'mcp_servers.omx_code_intel.enabled=false' \
   -c 'mcp_servers.omx_trace.enabled=false' \
   -m "${CODEX_BRIDGE_PEER_MODEL:-gpt-5.4}" \
-  "Bridge peer online for room $ROOM. Briefly acknowledge readiness, then wait for further requests from this thread."
+  "Bridge peer online for room $ROOM. 첫 응답으로 정확히 \"$ROOM 준비됐습니다. 다음 요청을 기다리겠습니다.\"만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요."
