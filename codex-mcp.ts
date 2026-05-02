@@ -10,7 +10,7 @@
  *   env = { CODEX_BRIDGE_ROOM = "ENG-1234" }
  *
  * Or set CODEX_BRIDGE_ROOM before launching:
- *   CODEX_BRIDGE_ROOM=ENG-1234 codex --full-auto
+ *   CODEX_BRIDGE_ROOM=ENG-1234 codex --dangerously-bypass-approvals-and-sandbox
  *
  * Tools:
  *   send_to_claude(message) — Send a message to Claude. Blocks until Claude replies (~2 min max).

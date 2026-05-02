@@ -160,7 +160,7 @@ For environments where the wrapper can't be used (e.g., custom MCP launchers), o
 
 ```bash
 TOKEN=$(curl -s -X POST http://localhost:8788/api/rooms/ENG-1234 | grep -o '"sessionToken":"[^"]*"' | cut -d'"' -f4)
-CODEX_BRIDGE_ROOM=ENG-1234 CODEX_BRIDGE_TOKEN=$TOKEN codex --full-auto
+CODEX_BRIDGE_ROOM=ENG-1234 CODEX_BRIDGE_TOKEN=$TOKEN codex --dangerously-bypass-approvals-and-sandbox
 ```
 
 ---

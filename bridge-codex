@@ -40,4 +40,13 @@ if [ -z "$TOKEN" ]; then
 fi
 
 printf "%s:%s" "$ROOM" "$TOKEN" > "/tmp/codex-bridge-room-$$"
-exec codex -C "$CODEX_BRIDGE_WORKDIR" --full-auto
+
+if codex --help 2>/dev/null | grep -q -- '--dangerously-bypass-approvals-and-sandbox'; then
+  set -- --dangerously-bypass-approvals-and-sandbox
+elif codex --help 2>/dev/null | grep -q -- '--full-auto'; then
+  set -- --full-auto
+else
+  set -- -a never -s danger-full-access
+fi
+
+exec codex -C "$CODEX_BRIDGE_WORKDIR" "$@"
