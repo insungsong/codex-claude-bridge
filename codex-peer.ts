@@ -256,7 +256,12 @@ function isCompletedAgentMessage(item: CompletedTurnItem): item is CompletedAgen
 }
 
 export function buildPeerReadyPrompt(roomId: string) {
-  return `Bridge peer online for room ${roomId}. 첫 응답으로 정확히 "${roomId} 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요.`
+  return [
+    `Bridge peer online for room ${roomId}.`,
+    `첫 응답으로 정확히 "${roomId} 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요.`,
+    '이후 non-trivial 요청은 leader Codex가 설계한 [Codex handoff]라고 가정하고 Role, Goal, Success criteria, Source context/evidence, Constraints, Task slice, Allowed tools/edits, Tool notes, Verification, Output, Stop rules 안에서만 수행하세요.',
+    '새 설계, scope 확대, dependency 추가, destructive command가 필요하면 실행하지 말고 BLOCKED로 보고하세요.',
+  ].join(' ')
 }
 
 export function selectTurnReply(items: CompletedTurnItem[]) {

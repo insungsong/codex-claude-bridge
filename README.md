@@ -246,21 +246,34 @@ Open [http://localhost:8788](http://localhost:8788) to watch all rooms in real t
 
 ---
 
-## Starting a conversation
+## Starting a handoff
 
 From inside a Codex session, tell it:
 
 ```
-Use the send_to_claude tool to discuss whether we should use Redis or Memcached for caching.
-Keep going until you reach a decision.
+Use send_to_claude with this bounded handoff:
+
+[Codex handoff]
+Role: executor
+Goal: Apply checklist item 2 from /absolute/path/to/dev-plan.md.
+Success criteria: item 2 is implemented, no files outside the allowed surface changed, and the targeted test passes.
+Source context / evidence: /absolute/path/to/dev-plan.md, current git diff, relevant test output.
+Task slice: checklist item 2 only.
+Constraints: do not change architecture, public API, dependencies, or unrelated formatting.
+Allowed tools / edits: shell tests and file edits limited to src/example.ts, tests/example.test.ts
+Do not: redesign the plan, expand scope, add dependencies, or run destructive commands.
+Tool notes: tests are retry-safe; file edits are local only; if required inputs are missing, report BLOCKED.
+Verification: run `bun test tests/example.test.ts` and report exit code plus key output.
+Output: [Codex result] with changed files, checklist status, verification results, deviations, blockers, and suggested next action.
+Stop rules: if the plan is ambiguous or the allowed edit surface is insufficient, report BLOCKED instead of guessing.
 ```
 
 Codex calls `send_to_claude()` → bridge pushes to the room's assistant side → the assistant replies → bridge returns to Codex.
 If the final reply is not ready, `send_to_claude()` returns a handoff status with the message id, progress state, peer liveness, and best-effort worktree evidence instead of encouraging an identical resend.
-Codex keeps calling `send_to_claude()` only when a real follow-up is needed for consensus.
+Codex calls `send_to_claude()` again only when a real follow-up is needed, such as answering a blocker or sending the next bounded slice.
 
 In Claude-backed rooms, the assistant side is the Claude channel plugin.  
-In Codex-backed rooms, the assistant side is a peer `codex app-server` thread with a foreground remote Codex attached to it.
+In Codex-backed rooms, the assistant side is a peer `codex app-server` thread with a foreground remote Codex attached to it. Treat that peer as executor, verifier, or reviewer for the assigned slice; keep problem framing, design decisions, and the final keep/revise/abort judgment in the primary Codex.
 
 For tiny relays, use the same rule with less ceremony:
 
@@ -269,7 +282,7 @@ Use send_to_claude with the exact non-empty message "ㅎㅇ".
 Do not run unrelated preflight checks first.
 ```
 
-If you need to inspect pending Claude-side proactive messages, use `check_claude_messages()` only after a real handoff has already happened, or when you are explicitly checking the pending queue. It is not a "ping the bridge before first send" step.
+If you need to inspect pending assistant-side proactive messages, use `check_claude_messages()` only after a real handoff has already happened, or when you are explicitly checking the pending queue. It is not a "ping the bridge before first send" step.
 For implementation, verification, or other multi-step work, the assistant side should call `mark_in_progress` within 30 seconds. A request that remains only `delivered` is treated as delivered but unclaimed, not active work.
 
 ---

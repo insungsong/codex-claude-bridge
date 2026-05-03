@@ -15,6 +15,7 @@ describe('bridge message payload', () => {
     ['   ', 'empty'],
     ['{{ARGUMENTS}}', 'placeholder-only'],
     [' "$send-to-claude" ', 'placeholder-only'],
+    [' "$send-to-codex" ', 'placeholder-only'],
     ['Task:', 'placeholder-only'],
     ['Task: {{ARGUMENTS}}', 'placeholder-only'],
     ['   `Task:`   ', 'placeholder-only'],

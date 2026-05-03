@@ -1,5 +1,6 @@
 const TEMPLATE_PLACEHOLDER_RE = /^{{[^{}]+}}$/
 const SEND_TO_CLAUDE_PREFIX_RE = /^\$send-to-claude\s*$/i
+const SEND_TO_CODEX_PREFIX_RE = /^\$send-to-codex\s*$/i
 const TASK_ONLY_RE = /^Task:\s*$/i
 const TASK_PLACEHOLDER_RE = /^Task:\s*{{[^{}]+}}\s*$/i
 
@@ -44,6 +45,7 @@ function isPlaceholderOnlyPayload(text: string) {
   return (
     TEMPLATE_PLACEHOLDER_RE.test(text) ||
     SEND_TO_CLAUDE_PREFIX_RE.test(text) ||
+    SEND_TO_CODEX_PREFIX_RE.test(text) ||
     TASK_ONLY_RE.test(text) ||
     TASK_PLACEHOLDER_RE.test(text)
   )
