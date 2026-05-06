@@ -298,7 +298,7 @@ Stop rules: do not act outside the Verification Matrix; if code changes are requ
 ### Bridge behavior
 
 Codex calls `send_to_claude()` → bridge pushes to the room's assistant side → the assistant replies → bridge returns to Codex.
-If the final reply is not ready, `send_to_claude()` returns a handoff status with the message id, progress state, peer liveness, and best-effort worktree evidence instead of encouraging an identical resend.
+If the final reply is not ready, `send_to_claude()` returns a handoff status with the message id, progress state, peer liveness, and best-effort worktree evidence instead of encouraging an identical resend. That status is not permission for the primary Codex to execute the delegated slice locally. The primary Codex should wait, check late replies or room status, or ask the user before taking over.
 Codex calls `send_to_claude()` again only when a real follow-up is needed, such as answering a blocker or sending the next bounded slice.
 
 In Claude-backed rooms, the assistant side is the Claude channel plugin.  

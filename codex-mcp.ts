@@ -226,7 +226,7 @@ function formatHandoffNotReadyMessage(
     `detail=${detail}`,
     ...formatWorktreeEvidence(beforeSnapshot, afterSnapshot),
     '같은 본문은 재전송하지 마세요. 필요하면 `check_claude_messages`로 이 handoff의 상태나 늦게 도착한 답변만 확인하세요.',
-    'Codex는 로컬 검증을 계속 진행해야 합니다.',
+    'Codex는 이 handoff의 실행 범위를 로컬에서 이어받지 마세요. 허용되는 다음 행동은 상태 확인, 대기, 또는 사용자에게 takeover 여부를 묻는 것뿐입니다.',
   ].join('\n')
 }
 
@@ -279,7 +279,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         '',
         'IMPORTANT: If the assistant replies with a blocker or question, call this tool again only with the narrowed answer or next bounded slice.',
         'Do not call this tool concurrently with the same message.',
-        'If it times out, do not immediately resend the exact same prompt.',
+        'If it times out, do not immediately resend the exact same prompt and do not start executing the delegated slice locally. Wait, check handoff status/late replies, or ask the user before any takeover.',
       ].join(' '),
       inputSchema: {
         type: 'object',
