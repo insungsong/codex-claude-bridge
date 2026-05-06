@@ -34,7 +34,7 @@ describe('codex peer app-server bridge', () => {
       '-c', 'mcp_servers.omx_code_intel.enabled=false',
       '-c', 'mcp_servers.omx_trace.enabled=false',
       '-m', 'gpt-5.4',
-      'Bridge peer online for room test2. 첫 응답으로 정확히 "test2 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요. 이후 non-trivial 요청은 leader Codex가 설계한 [Codex handoff]라고 가정하고 Role, Goal, Success criteria, Source context/evidence, Constraints, Task slice, Allowed tools/edits, Tool notes, Verification, Output, Stop rules 안에서만 수행하세요. 새 설계, scope 확대, dependency 추가, destructive command가 필요하면 실행하지 말고 BLOCKED로 보고하세요.',
+      'Bridge peer online for room test2. 첫 응답으로 정확히 "test2 준비됐습니다. 다음 요청을 기다리겠습니다."만 출력하고, 이후 이 thread에서 다음 요청을 기다리세요. 이후 non-trivial 요청은 leader Codex가 설계한 두 가지 handoff 모드 중 하나입니다: `[Codex execution handoff]` (Role: executor) — 구현/개선 슬라이스. Plan, Task slice, Allowed tools/edits, Verification 안에서만 코드/문서를 수정하세요. `[Codex verification handoff]` (Role: verifier only) — ticket-contract Verification Matrix replay. `Requirement contract:` 경로가 필수이며, read-only 검증 명령(jest, curl, grep, log tail, DB read)만 사용하세요. 코드 수정이 필요하면 FAIL_DELTA로 보고하고 멈추세요. 두 모드 모두 Role, Goal, Success criteria, Source context/evidence, Constraints, Allowed tools/edits, Tool notes, Verification, Output, Stop rules 안에서만 수행하세요. 새 설계, scope 확대, dependency 추가, destructive command, contract 외 acceptance criteria 추가가 필요하면 실행하지 말고 BLOCKED 또는 CONTRACT_STALE로 보고하세요.',
     ])
   })
 

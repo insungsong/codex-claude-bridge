@@ -250,10 +250,14 @@ Open [http://localhost:8788](http://localhost:8788) to watch all rooms in real t
 
 From inside a Codex session, tell it:
 
+### Execution mode (`[Codex execution handoff]`)
+
+Use this for implementation or code-improvement slices.
+
 ```
 Use send_to_claude with this bounded handoff:
 
-[Codex handoff]
+[Codex execution handoff]
 Role: executor
 Goal: Apply checklist item 2 from /absolute/path/to/dev-plan.md.
 Success criteria: item 2 is implemented, no files outside the allowed surface changed, and the targeted test passes.
@@ -268,12 +272,37 @@ Output: [Codex result] with changed files, checklist status, verification result
 Stop rules: if the plan is ambiguous or the allowed edit surface is insufficient, report BLOCKED instead of guessing.
 ```
 
+### Verification mode (`[Codex verification handoff]`)
+
+Use this only when a normalized ticket-contract exists. The peer is read-only and replays the contract's Verification Matrix.
+
+```
+Use send_to_claude with this bounded handoff:
+
+[Codex verification handoff]
+Role: verifier only
+Goal: ticket-contract Verification Matrix replay
+Requirement contract: /absolute/path/to/docs/tickets/ENG-XXXX.requirement-contract.md
+Source context / evidence: worktree path, current git diff, related policy docs.
+Do not redefine the problem.
+Do not infer new acceptance criteria from Linear directly.
+If Linear conflicts with the contract, report CONTRACT_STALE.
+Verify only against the contract's Verification Matrix.
+Allowed tools: read-only verification commands (jest, curl, grep, log tail, DB read query) for evidence collection.
+Do not: modify code, change design, add acceptance criteria outside the contract, or infer from Linear directly.
+Report PASS / WARN_DELTA / FAIL_DELTA / CONTRACT_STALE with evidence and a Final Decision Card (final decision, readiness score, blockers, warnings, required next action).
+Output: [Codex result] including verification results by manifest id and the Final Decision Card.
+Stop rules: do not act outside the Verification Matrix; if code changes are required, stop and report FAIL_DELTA — a separate execution handoff is needed.
+```
+
+### Bridge behavior
+
 Codex calls `send_to_claude()` → bridge pushes to the room's assistant side → the assistant replies → bridge returns to Codex.
 If the final reply is not ready, `send_to_claude()` returns a handoff status with the message id, progress state, peer liveness, and best-effort worktree evidence instead of encouraging an identical resend.
 Codex calls `send_to_claude()` again only when a real follow-up is needed, such as answering a blocker or sending the next bounded slice.
 
 In Claude-backed rooms, the assistant side is the Claude channel plugin.  
-In Codex-backed rooms, the assistant side is a peer `codex app-server` thread with a foreground remote Codex attached to it. Treat that peer as executor, verifier, or reviewer for the assigned slice; keep problem framing, design decisions, and the final keep/revise/abort judgment in the primary Codex.
+In Codex-backed rooms, the assistant side is a peer `codex app-server` thread with a foreground remote Codex attached to it. Treat that peer as executor or verifier only for the assigned slice — never as planner, reviewer, or consensus partner. Keep problem framing, design decisions, and the final keep/revise/abort judgment in the primary Codex.
 
 For tiny relays, use the same rule with less ceremony:
 
