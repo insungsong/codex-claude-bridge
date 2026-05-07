@@ -5,12 +5,17 @@
 
 import { createInterface } from 'readline'
 import { spawnSync } from 'child_process'
+import { readFileSync, statSync } from 'fs'
 
 import { getTerminalSessions, shutdownRoomTerminals } from './room-terminals'
 
 const BRIDGE_URL = process.env.CODEX_BRIDGE_URL ?? 'http://localhost:8788'
 const BRIDGE_DIR = new URL('.', import.meta.url).pathname
+const SELF_PATH = new URL(import.meta.url).pathname
 const VERSION = 'v0.4'
+const DASHBOARD_REFRESH_MS = Math.max(1000, Number(process.env.CODEX_BRIDGE_REFRESH_MS ?? 1500))
+const PANE_TITLE_TMUX_SESSION = 'cbridge-pane-title-updater'
+const PANE_TITLE_HEADER_VERSION = '1'
 
 type Room = {
   id: string
@@ -20,6 +25,29 @@ type Room = {
   claudeConnected: boolean
   codexConnected: boolean
   lastActivity: number
+}
+
+type PromptSummaryCache = {
+  mtimeMs: number
+  size: number
+  prompt: string
+}
+
+type TmuxPane = {
+  target: string
+  paneId: string
+  sessionName: string
+  panePid: number
+  width: number
+  height: number
+}
+
+type TmuxTitleHeaderPane = {
+  target: string
+  paneId: string
+  sessionName: string
+  headerFor: string
+  version: string
 }
 
 // ── ANSI helpers ──
@@ -61,6 +89,66 @@ function rpad(s: string, n: number) {
   return diff > 0 ? s + ' '.repeat(diff) : s
 }
 
+function sanitizePaneTitle(value: string): string {
+  return vis(value)
+    .replace(/[#\n\r\t]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function truncateVisible(s: string, maxWidth: number): string {
+  if (visWidth(s) <= maxWidth) return s
+  let width = 0
+  let out = ''
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    const chWidth = (
+      (cp >= 0x1100 && cp <= 0x115F) ||
+      (cp >= 0xAC00 && cp <= 0xD7AF) ||
+      (cp >= 0x4E00 && cp <= 0x9FFF) ||
+      (cp >= 0x3000 && cp <= 0x303F) ||
+      (cp >= 0xFF00 && cp <= 0xFF60)
+    ) ? 2 : 1
+    if (width + chWidth > maxWidth - 1) break
+    out += ch
+    width += chWidth
+  }
+  return `${out}…`
+}
+
+function takeVisible(s: string, maxWidth: number): [string, string] {
+  if (maxWidth <= 0) return ['', s]
+  let width = 0
+  let out = ''
+  let index = 0
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0
+    const chWidth = (
+      (cp >= 0x1100 && cp <= 0x115F) ||
+      (cp >= 0xAC00 && cp <= 0xD7AF) ||
+      (cp >= 0x4E00 && cp <= 0x9FFF) ||
+      (cp >= 0x3000 && cp <= 0x303F) ||
+      (cp >= 0xFF00 && cp <= 0xFF60)
+    ) ? 2 : 1
+    if (width + chWidth > maxWidth) break
+    out += ch
+    width += chWidth
+    index += ch.length
+  }
+  return [out.trimEnd(), s.slice(index).trimStart()]
+}
+
+function titleLines(roomId: string, prompt: string, width: number): [string, string] {
+  const lineWidth = Math.max(18, width - 2)
+  const prefix = `${roomId} `
+  const normalizedPrompt = sanitizePaneTitle(prompt)
+  const [firstPrompt, remaining] = takeVisible(normalizedPrompt, Math.max(0, lineWidth - visWidth(prefix)))
+  return [
+    `${prefix}${firstPrompt}`.trimEnd(),
+    truncateVisible(remaining, lineWidth),
+  ]
+}
+
 const BOX = 54
 function boxTop()    { return `  ${C.gray}╭${'─'.repeat(BOX)}╮${C.reset}` }
 function boxBottom() { return `  ${C.gray}╰${'─'.repeat(BOX)}╯${C.reset}` }
@@ -69,6 +157,10 @@ function boxRow(content: string) {
   return `  ${C.gray}│${C.reset}${content}${' '.repeat(Math.max(0, pad))}${C.gray}│${C.reset}`
 }
 function divider() { return `  ${C.gray}${'─'.repeat(BOX)}${C.reset}` }
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
 
 // ── Bridge server management ──
 
@@ -117,6 +209,299 @@ async function closeRoom(roomId: string): Promise<boolean> {
 }
 
 // ── Display ──
+
+const promptSummaryCache = new Map<string, PromptSummaryCache>()
+
+function getLeaderCodexProcesses(): Map<number, string> {
+  const result = new Map<number, string>()
+  try {
+    const out = spawnSync('ps', ['eww', '-axo', 'pid=,command='], { encoding: 'utf8' }).stdout ?? ''
+    for (const line of out.split('\n')) {
+      if (!/\/codex\/codex\s/.test(line)) continue
+      const room = line.match(/\bCODEX_BRIDGE_ROOM=(LEADER-\d+)\b/)?.[1]
+      if (!room) continue
+      const pid = Number(line.trim().match(/^(\d+)/)?.[1])
+      if (!Number.isFinite(pid)) continue
+      result.set(pid, room)
+    }
+  } catch {}
+  return result
+}
+
+function getOpenCodexSessionFiles(pids: number[]): Map<number, string> {
+  const result = new Map<number, string>()
+  const mtimes = new Map<number, number>()
+  if (pids.length === 0) return result
+  try {
+    const out = spawnSync('lsof', ['-p', pids.join(',')], { encoding: 'utf8' }).stdout ?? ''
+    for (const line of out.split('\n')) {
+      if (!line.endsWith('.jsonl')) continue
+      const pid = Number(line.match(/^\S+\s+(\d+)\s/)?.[1])
+      const pathStart = line.indexOf('/Users/')
+      if (!Number.isFinite(pid) || pathStart < 0) continue
+      const path = line.slice(pathStart)
+      let mtimeMs = 0
+      try {
+        mtimeMs = statSync(path).mtimeMs
+      } catch {}
+      if (!result.has(pid) || mtimeMs >= (mtimes.get(pid) ?? 0)) {
+        result.set(pid, path)
+        mtimes.set(pid, mtimeMs)
+      }
+    }
+  } catch {}
+  return result
+}
+
+function cleanUserPrompt(raw: string): string | undefined {
+  const normalized = raw.replace(/\s+/g, ' ').trim()
+  if (!normalized) return undefined
+  if (normalized.startsWith('# AGENTS.md instructions')) return undefined
+  if (normalized.startsWith('<hook_prompt')) return undefined
+  if (normalized.startsWith('<environment_context>')) return undefined
+  if (normalized.startsWith('You are the responder in a Codex-Codex Bridge room')) return undefined
+
+  const withoutSessionPath = normalized
+    .replace(/\/Users\/wjh\/\S+?\.jsonl/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return withoutSessionPath || undefined
+}
+
+function extractPromptText(record: any): string | undefined {
+  if (record?.type === 'response_item' && record?.payload?.type === 'message' && record?.payload?.role === 'user') {
+    const parts = Array.isArray(record.payload.content)
+      ? record.payload.content
+          .filter((item: any) => item?.type === 'input_text' || item?.type === 'text')
+          .map((item: any) => String(item.text ?? ''))
+      : []
+    return parts.join(' ')
+  }
+  if (record?.type === 'event_msg' && record?.payload?.type === 'user_message') {
+    return String(record.payload.message ?? '')
+  }
+  return undefined
+}
+
+function latestPromptSummaryFromFile(path: string): string {
+  try {
+    const stat = statSync(path)
+    const cached = promptSummaryCache.get(path)
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.prompt
+
+    const prompts: string[] = []
+    const seen = new Set<string>()
+    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
+    for (let i = lines.length - 1; i >= 0 && prompts.length < 4; i--) {
+      try {
+        const text = cleanUserPrompt(extractPromptText(JSON.parse(lines[i])) ?? '')
+        if (!text || seen.has(text)) continue
+        seen.add(text)
+        prompts.unshift(text)
+      } catch {}
+    }
+
+    const prompt = prompts[prompts.length - 1] ?? '최근 프롬프트 없음'
+    promptSummaryCache.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, prompt })
+    return prompt
+  } catch {
+    return '최근 프롬프트 확인 불가'
+  }
+}
+
+function tmux(args: string[]): void {
+  spawnSync('tmux', args, { stdout: 'ignore', stderr: 'ignore' })
+}
+
+function tmuxOutput(args: string[]): string {
+  try {
+    return spawnSync('tmux', args, { encoding: 'utf8' }).stdout ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function getTmuxLeaderPanes(): TmuxPane[] {
+  const panes: TmuxPane[] = []
+  try {
+    const out = tmuxOutput([
+      'list-panes',
+      '-a',
+      '-F',
+      '#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_width}\t#{pane_height}',
+    ])
+
+    for (const line of out.split('\n')) {
+      const [sessionName, paneId, panePidRaw, command, widthRaw, heightRaw] = line.split('\t')
+      if (!sessionName?.startsWith('cbridge-leaders-')) continue
+      if (command !== 'codex') continue
+      const panePid = Number(panePidRaw)
+      const width = Number(widthRaw)
+      const height = Number(heightRaw)
+      if (!Number.isFinite(panePid)) continue
+      panes.push({
+        sessionName,
+        paneId,
+        panePid,
+        width: Number.isFinite(width) ? width : 80,
+        height: Number.isFinite(height) ? height : 24,
+        target: paneId,
+      })
+    }
+  } catch {}
+  return panes
+}
+
+function getTmuxTitleHeaders(): TmuxTitleHeaderPane[] {
+  const headers: TmuxTitleHeaderPane[] = []
+  const out = tmuxOutput([
+    'list-panes',
+    '-a',
+    '-F',
+    '#{session_name}\t#{pane_id}\t#{@cbridge_header_for}\t#{@cbridge_title_header_version}',
+  ])
+
+  for (const line of out.split('\n')) {
+    const [sessionName, paneId, headerFor, version] = line.split('\t')
+    if (!sessionName?.startsWith('cbridge-leaders-')) continue
+    if (!paneId || !headerFor?.startsWith('%')) continue
+    headers.push({ sessionName, paneId, headerFor, version, target: paneId })
+  }
+  return headers
+}
+
+function cleanupTmuxTitleHeaders(headers: TmuxTitleHeaderPane[], livePaneIds: Set<string>): void {
+  const seen = new Set<string>()
+  for (const header of headers) {
+    if (header.version !== PANE_TITLE_HEADER_VERSION || !livePaneIds.has(header.headerFor) || seen.has(header.headerFor)) {
+      tmux(['kill-pane', '-t', header.target])
+      continue
+    }
+    seen.add(header.headerFor)
+  }
+}
+
+function tmuxTitleHeaderCommand(targetPaneId: string): string {
+  const interval = String(Math.max(1, DASHBOARD_REFRESH_MS / 1000))
+  return [
+    'while :; do',
+    `line1=$(tmux display-message -p -t ${shellQuote(targetPaneId)} ${shellQuote('#{@cbridge_title_line_1}')} 2>/dev/null) || exit 0;`,
+    `line2=$(tmux display-message -p -t ${shellQuote(targetPaneId)} ${shellQuote('#{@cbridge_title_line_2}')} 2>/dev/null) || exit 0;`,
+    `printf '\\033[?7l\\033[?25l\\033[H\\033[2K\\033[96;1m%s\\033[0m\\n\\033[2K\\033[93;1m%s\\033[0m' "$line1" "$line2";`,
+    `sleep ${shellQuote(interval)};`,
+    'done',
+  ].join(' ')
+}
+
+function ensureTmuxTitleHeader(pane: TmuxPane, headersByPane: Map<string, TmuxTitleHeaderPane>): void {
+  const existing = headersByPane.get(pane.paneId)
+  if (existing) {
+    tmux(['resize-pane', '-t', existing.target, '-y', '2'])
+    tmux(['select-pane', '-t', existing.target, '-T', ''])
+    return
+  }
+  if (pane.height < 8) return
+
+  const headerId = tmuxOutput([
+    'split-window',
+    '-v',
+    '-b',
+    '-l',
+    '3',
+    '-P',
+    '-F',
+    '#{pane_id}',
+    '-t',
+    pane.target,
+    tmuxTitleHeaderCommand(pane.paneId),
+  ]).trim()
+  if (!headerId) return
+
+  tmux(['set-option', '-pt', headerId, '@cbridge_header_for', pane.paneId])
+  tmux(['set-option', '-pt', headerId, '@cbridge_title_header', '1'])
+  tmux(['set-option', '-pt', headerId, '@cbridge_title_header_version', PANE_TITLE_HEADER_VERSION])
+  tmux(['resize-pane', '-t', headerId, '-y', '2'])
+  tmux(['select-pane', '-t', headerId, '-T', ''])
+  tmux(['select-pane', '-t', pane.target])
+  headersByPane.set(pane.paneId, {
+    target: headerId,
+    paneId: headerId,
+    sessionName: pane.sessionName,
+    headerFor: pane.paneId,
+    version: PANE_TITLE_HEADER_VERSION,
+  })
+}
+
+function updateTmuxPaneTitlesOnce(): void {
+  const panes = getTmuxLeaderPanes()
+  const livePaneIds = new Set(panes.map(pane => pane.paneId))
+  let headers = getTmuxTitleHeaders()
+  cleanupTmuxTitleHeaders(headers, livePaneIds)
+  headers = getTmuxTitleHeaders()
+  const headersByPane = new Map(
+    headers
+      .filter(header => livePaneIds.has(header.headerFor))
+      .map(header => [header.headerFor, header] as const),
+  )
+
+  const processes = getLeaderCodexProcesses()
+  const files = getOpenCodexSessionFiles(panes.map(pane => pane.panePid))
+  const touchedSessions = new Set<string>()
+
+  for (const pane of panes) {
+    const roomId = processes.get(pane.panePid)
+    if (!roomId) continue
+    const prompt = latestPromptSummaryFromFile(files.get(pane.panePid) ?? '')
+    const [line1, line2] = titleLines(roomId, prompt, pane.width)
+    tmux(['set-option', '-pt', pane.target, '@cbridge_room', roomId])
+    tmux(['set-option', '-pt', pane.target, '@cbridge_prompt', `${line1} ${line2}`.trim()])
+    tmux(['set-option', '-pt', pane.target, '@cbridge_title_line_1', line1])
+    tmux(['set-option', '-pt', pane.target, '@cbridge_title_line_2', line2])
+    tmux(['select-pane', '-t', pane.target, '-T', ''])
+    ensureTmuxTitleHeader(pane, headersByPane)
+    touchedSessions.add(pane.sessionName)
+  }
+
+  for (const sessionName of touchedSessions) {
+    tmux(['set-window-option', '-t', `${sessionName}:0`, 'pane-border-status', 'off'])
+    tmux(['set-window-option', '-u', '-t', `${sessionName}:0`, 'pane-border-format'])
+    tmux(['set-option', '-t', sessionName, 'set-titles', 'off'])
+    tmux(['set-option', '-t', sessionName, 'status', 'off'])
+    tmux(['set-option', '-u', '-t', sessionName, 'status-format[0]'])
+    tmux(['set-option', '-u', '-t', sessionName, 'status-format[1]'])
+  }
+}
+
+async function watchTmuxPaneTitles(): Promise<void> {
+  while (true) {
+    updateTmuxPaneTitlesOnce()
+    await Bun.sleep(DASHBOARD_REFRESH_MS)
+  }
+}
+
+function hasTmuxSession(sessionName: string): boolean {
+  try {
+    return spawnSync('tmux', ['has-session', '-t', sessionName], { stdout: 'ignore', stderr: 'ignore' }).status === 0
+  } catch {
+    return false
+  }
+}
+
+function ensureTmuxPaneTitleUpdater(): void {
+  if (process.env.CODEX_BRIDGE_PANE_TITLES === '0') return
+  if (hasTmuxSession(PANE_TITLE_TMUX_SESSION)) return
+
+  const tmuxCommand = `${shellQuote(process.execPath)} ${shellQuote(SELF_PATH)} tmux-pane-titles --watch`
+  tmux([
+    'new-session',
+    '-d',
+    '-s',
+    PANE_TITLE_TMUX_SESSION,
+    '-c',
+    BRIDGE_DIR,
+    tmuxCommand,
+  ])
+}
 
 function formatAge(ts: number): string {
   const secs = Math.floor((Date.now() - ts) / 1000)
@@ -338,6 +723,7 @@ async function main(): Promise<void> {
   process.stdout.write(`\n  ${C.dim}Connecting to bridge...${C.reset} `)
   try {
     await ensureBridge()
+    ensureTmuxPaneTitleUpdater()
     console.log(`${C.bgreen}ready${C.reset}\n`)
   } catch (err) {
     console.error(`\n  ${C.red}✗${C.reset} ${err instanceof Error ? err.message : err}`)
@@ -454,6 +840,18 @@ async function main(): Promise<void> {
       continue
     }
   }
+}
+
+if (process.argv[2] === 'tmux-pane-titles') {
+  if (process.argv.includes('--start')) {
+    ensureTmuxPaneTitleUpdater()
+    process.exit(0)
+  }
+  updateTmuxPaneTitlesOnce()
+  if (process.argv.includes('--watch')) {
+    await watchTmuxPaneTitles()
+  }
+  process.exit(0)
 }
 
 await main()
