@@ -163,20 +163,20 @@ function isInternalRoomId(value: string): boolean {
 }
 
 function isIssueLikeId(value: string): boolean {
-  return /^[A-Z][A-Z0-9]{1,9}-\d+$/.test(value) && !isInternalRoomId(value)
+  return /^[A-Z]{2,10}-\d+$/.test(value) && !isInternalRoomId(value)
 }
 
 function extractWorkLabelFromText(value: string): string | undefined {
   const text = sanitizePaneTitle(value)
   const docMatches = [
-    ...text.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d+)[^/\s`'"]*\.(?:task-state|linear)\.md\b/g),
+    ...text.matchAll(/\b([A-Z]{2,10}-\d+)[^/\s`'"]*\.(?:task-state|linear)\.md\b/g),
   ]
   for (let i = docMatches.length - 1; i >= 0; i--) {
     const label = docMatches[i]?.[1]
     if (label && isIssueLikeId(label)) return label
   }
 
-  const issueMatches = [...text.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g)]
+  const issueMatches = [...text.matchAll(/\b([A-Z]{2,10}-\d+)\b/g)]
   for (let i = issueMatches.length - 1; i >= 0; i--) {
     const label = issueMatches[i]?.[1]
     if (label && isIssueLikeId(label)) return label
