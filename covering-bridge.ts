@@ -15,7 +15,7 @@ const SELF_PATH = new URL(import.meta.url).pathname
 const VERSION = 'v0.4'
 const DASHBOARD_REFRESH_MS = Math.max(1000, Number(process.env.CODEX_BRIDGE_REFRESH_MS ?? 1500))
 const PANE_TITLE_TMUX_SESSION = 'cbridge-pane-title-updater'
-const PANE_TITLE_HEADER_VERSION = '1'
+const PANE_TITLE_HEADER_VERSION = '2'
 
 type Room = {
   id: string
@@ -33,11 +33,20 @@ type PromptSummaryCache = {
   prompt: string
 }
 
+type PaneRole = 'leader' | 'peer'
+
+type BridgeProcess = {
+  roomId: string
+  role: PaneRole
+}
+
 type TmuxPane = {
   target: string
   paneId: string
   sessionName: string
   panePid: number
+  role: PaneRole
+  roleLabel: string
   width: number
   height: number
 }
@@ -138,15 +147,57 @@ function takeVisible(s: string, maxWidth: number): [string, string] {
   return [out.trimEnd(), s.slice(index).trimStart()]
 }
 
-function titleLines(roomId: string, prompt: string, width: number): [string, string] {
+function titleLines(prefixText: string, prompt: string, width: number): [string, string] {
   const lineWidth = Math.max(18, width - 2)
-  const prefix = `${roomId} `
+  const prefix = `${prefixText} `
   const normalizedPrompt = sanitizePaneTitle(prompt)
   const [firstPrompt, remaining] = takeVisible(normalizedPrompt, Math.max(0, lineWidth - visWidth(prefix)))
   return [
     `${prefix}${firstPrompt}`.trimEnd(),
     truncateVisible(remaining, lineWidth),
   ]
+}
+
+function isInternalRoomId(value: string): boolean {
+  return /^(LEADER|PEER)-\d+$/i.test(value)
+}
+
+function isIssueLikeId(value: string): boolean {
+  return /^[A-Z][A-Z0-9]{1,9}-\d+$/.test(value) && !isInternalRoomId(value)
+}
+
+function extractWorkLabelFromText(value: string): string | undefined {
+  const text = sanitizePaneTitle(value)
+  const docMatches = [
+    ...text.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d+)[^/\s`'"]*\.(?:task-state|linear)\.md\b/g),
+  ]
+  for (let i = docMatches.length - 1; i >= 0; i--) {
+    const label = docMatches[i]?.[1]
+    if (label && isIssueLikeId(label)) return label
+  }
+
+  const issueMatches = [...text.matchAll(/\b([A-Z][A-Z0-9]{1,9}-\d+)\b/g)]
+  for (let i = issueMatches.length - 1; i >= 0; i--) {
+    const label = issueMatches[i]?.[1]
+    if (label && isIssueLikeId(label)) return label
+  }
+
+  return undefined
+}
+
+function titlePrefixForPane(pane: TmuxPane, roomId: string, workLabel?: string): string {
+  const parts = [pane.roleLabel]
+  const primaryContext = workLabel ?? (isIssueLikeId(roomId) ? roomId : undefined)
+  if (primaryContext && primaryContext !== pane.roleLabel) parts.push(primaryContext)
+  if (
+    roomId &&
+    roomId !== pane.roleLabel &&
+    roomId !== primaryContext &&
+    !isInternalRoomId(roomId)
+  ) {
+    parts.push(roomId)
+  }
+  return parts.join(' · ')
 }
 
 const BOX = 54
@@ -212,19 +263,34 @@ async function closeRoom(roomId: string): Promise<boolean> {
 
 const promptSummaryCache = new Map<string, PromptSummaryCache>()
 
-function getLeaderCodexProcesses(): Map<number, string> {
-  const result = new Map<number, string>()
+function roomIdFromProcessLine(line: string): string | undefined {
+  const raw = line.match(/\bCODEX_BRIDGE_ROOM=("[^"]+"|'[^']+'|\S+)/)?.[1]
+  return raw?.replace(/^['"]|['"]$/g, '')
+}
+
+function getBridgeProcesses(): Map<number, BridgeProcess> {
+  const result = new Map<number, BridgeProcess>()
   try {
     const out = spawnSync('ps', ['eww', '-axo', 'pid=,command='], { encoding: 'utf8' }).stdout ?? ''
     for (const line of out.split('\n')) {
-      if (!/\/codex\/codex\s/.test(line)) continue
-      const room = line.match(/\bCODEX_BRIDGE_ROOM=(LEADER-\d+)\b/)?.[1]
+      const isLeader = /\/codex\/codex\s/.test(line)
+      const isPeer = /\bcodex-peer-agent\.ts\b/.test(line)
+      if (!isLeader && !isPeer) continue
+      const room = roomIdFromProcessLine(line)
       if (!room) continue
       const pid = Number(line.trim().match(/^(\d+)/)?.[1])
       if (!Number.isFinite(pid)) continue
-      result.set(pid, room)
+      result.set(pid, { roomId: room, role: isPeer ? 'peer' : 'leader' })
     }
   } catch {}
+  return result
+}
+
+function getLeaderCodexProcesses(): Map<number, string> {
+  const result = new Map<number, string>()
+  for (const [pid, processInfo] of getBridgeProcesses()) {
+    if (processInfo.role === 'leader') result.set(pid, processInfo.roomId)
+  }
   return result
 }
 
@@ -309,6 +375,29 @@ function latestPromptSummaryFromFile(path: string): string {
   }
 }
 
+function latestWorkLabelFromFile(path: string): string | undefined {
+  try {
+    const lines = readFileSync(path, 'utf8').trimEnd().split('\n')
+    for (let i = lines.length - 1, checked = 0; i >= 0 && checked < 80; i--, checked++) {
+      const line = lines[i] ?? ''
+      try {
+        const text = cleanUserPrompt(extractPromptText(JSON.parse(line)) ?? '')
+        const label = text ? extractWorkLabelFromText(text) : undefined
+        if (label) return label
+      } catch {}
+
+      if (
+        line.includes('.task-state.md') ||
+        line.includes('.linear.md')
+      ) {
+        const label = extractWorkLabelFromText(line)
+        if (label) return label
+      }
+    }
+  } catch {}
+  return undefined
+}
+
 function tmux(args: string[]): void {
   spawnSync('tmux', args, { stdout: 'ignore', stderr: 'ignore' })
 }
@@ -321,7 +410,27 @@ function tmuxOutput(args: string[]): string {
   }
 }
 
-function getTmuxLeaderPanes(): TmuxPane[] {
+function isCbridgeTitleSession(sessionName: string): boolean {
+  return (
+    sessionName.startsWith('cbridge-leaders-') ||
+    sessionName.startsWith('cbridge-peer-') ||
+    sessionName === 'cbridge-peers'
+  )
+}
+
+function peerLabelFromSession(sessionName: string, roomId?: string): string {
+  const sessionMatch = sessionName.match(/^cbridge-peer-(.+)$/)?.[1]
+  if (sessionMatch) return `PEER-${sessionMatch}`
+  const roomMatch = roomId?.match(/^LEADER-(\d+)$/i)?.[1]
+  if (roomMatch) return `PEER-${roomMatch}`
+  return 'PEER'
+}
+
+function leaderLabelFromRoom(roomId?: string): string {
+  return roomId && /^LEADER-\d+$/i.test(roomId) ? roomId.toUpperCase() : 'LEADER'
+}
+
+function getTmuxBridgePanes(processes: Map<number, BridgeProcess>): TmuxPane[] {
   const panes: TmuxPane[] = []
   try {
     const out = tmuxOutput([
@@ -333,23 +442,46 @@ function getTmuxLeaderPanes(): TmuxPane[] {
 
     for (const line of out.split('\n')) {
       const [sessionName, paneId, panePidRaw, command, widthRaw, heightRaw] = line.split('\t')
-      if (!sessionName?.startsWith('cbridge-leaders-')) continue
-      if (command !== 'codex') continue
       const panePid = Number(panePidRaw)
       const width = Number(widthRaw)
       const height = Number(heightRaw)
       if (!Number.isFinite(panePid)) continue
-      panes.push({
-        sessionName,
-        paneId,
-        panePid,
-        width: Number.isFinite(width) ? width : 80,
-        height: Number.isFinite(height) ? height : 24,
-        target: paneId,
-      })
+      const processInfo = processes.get(panePid)
+      if (sessionName?.startsWith('cbridge-leaders-')) {
+        if (command !== 'codex') continue
+        panes.push({
+          sessionName,
+          paneId,
+          panePid,
+          role: 'leader',
+          roleLabel: leaderLabelFromRoom(processInfo?.roomId),
+          width: Number.isFinite(width) ? width : 80,
+          height: Number.isFinite(height) ? height : 24,
+          target: paneId,
+        })
+        continue
+      }
+      if (sessionName?.startsWith('cbridge-peer-') || sessionName === 'cbridge-peers') {
+        if (command !== 'bun') continue
+        panes.push({
+          sessionName,
+          paneId,
+          panePid,
+          role: 'peer',
+          roleLabel: peerLabelFromSession(sessionName, processInfo?.roomId),
+          width: Number.isFinite(width) ? width : 80,
+          height: Number.isFinite(height) ? height : 24,
+          target: paneId,
+        })
+      }
     }
   } catch {}
   return panes
+}
+
+function getTmuxLeaderPanes(): TmuxPane[] {
+  const processes = getBridgeProcesses()
+  return getTmuxBridgePanes(processes).filter(pane => pane.role === 'leader')
 }
 
 function getTmuxTitleHeaders(): TmuxTitleHeaderPane[] {
@@ -363,7 +495,7 @@ function getTmuxTitleHeaders(): TmuxTitleHeaderPane[] {
 
   for (const line of out.split('\n')) {
     const [sessionName, paneId, headerFor, version] = line.split('\t')
-    if (!sessionName?.startsWith('cbridge-leaders-')) continue
+    if (!sessionName || !isCbridgeTitleSession(sessionName)) continue
     if (!paneId || !headerFor?.startsWith('%')) continue
     headers.push({ sessionName, paneId, headerFor, version, target: paneId })
   }
@@ -433,7 +565,8 @@ function ensureTmuxTitleHeader(pane: TmuxPane, headersByPane: Map<string, TmuxTi
 }
 
 function updateTmuxPaneTitlesOnce(): void {
-  const panes = getTmuxLeaderPanes()
+  const processes = getBridgeProcesses()
+  const panes = getTmuxBridgePanes(processes)
   const livePaneIds = new Set(panes.map(pane => pane.paneId))
   let headers = getTmuxTitleHeaders()
   cleanupTmuxTitleHeaders(headers, livePaneIds)
@@ -444,19 +577,43 @@ function updateTmuxPaneTitlesOnce(): void {
       .map(header => [header.headerFor, header] as const),
   )
 
-  const processes = getLeaderCodexProcesses()
-  const files = getOpenCodexSessionFiles(panes.map(pane => pane.panePid))
+  const leaderPanes = panes.filter(pane => pane.role === 'leader')
+  const files = getOpenCodexSessionFiles(leaderPanes.map(pane => pane.panePid))
+  const promptByRoom = new Map<string, string>()
+  const workLabelByRoom = new Map<string, string>()
   const touchedSessions = new Set<string>()
 
-  for (const pane of panes) {
-    const roomId = processes.get(pane.panePid)
-    if (!roomId) continue
+  for (const pane of leaderPanes) {
+    const processInfo = processes.get(pane.panePid)
+    if (!processInfo) continue
     const prompt = latestPromptSummaryFromFile(files.get(pane.panePid) ?? '')
-    const [line1, line2] = titleLines(roomId, prompt, pane.width)
+    promptByRoom.set(processInfo.roomId, prompt)
+    const filePath = files.get(pane.panePid)
+    const workLabel = isIssueLikeId(processInfo.roomId)
+      ? processInfo.roomId
+      : (filePath ? latestWorkLabelFromFile(filePath) : undefined)
+    if (workLabel) workLabelByRoom.set(processInfo.roomId, workLabel)
+  }
+
+  for (const pane of panes) {
+    const processInfo = processes.get(pane.panePid)
+    if (!processInfo) continue
+    const roomId = processInfo.roomId
+    const filePath = pane.role === 'leader' ? files.get(pane.panePid) : undefined
+    const prompt = pane.role === 'leader'
+      ? latestPromptSummaryFromFile(filePath ?? '')
+      : (promptByRoom.get(roomId) ?? '응답자 세션')
+    const workLabel = isIssueLikeId(roomId)
+      ? roomId
+      : (filePath ? latestWorkLabelFromFile(filePath) : workLabelByRoom.get(roomId))
+    const prefix = titlePrefixForPane(pane, roomId, workLabel)
+    const [line1, line2] = titleLines(prefix, prompt, pane.width)
     tmux(['set-option', '-pt', pane.target, '@cbridge_room', roomId])
+    tmux(['set-option', '-pt', pane.target, '@cbridge_work_label', workLabel ?? ''])
     tmux(['set-option', '-pt', pane.target, '@cbridge_prompt', `${line1} ${line2}`.trim()])
     tmux(['set-option', '-pt', pane.target, '@cbridge_title_line_1', line1])
     tmux(['set-option', '-pt', pane.target, '@cbridge_title_line_2', line2])
+    tmux(['set-option', '-pt', pane.target, '@cbridge_border_title', `#[fg=colour14,bold]${line1} #[fg=colour245]│ #[fg=colour229,bold]${line2}`])
     tmux(['select-pane', '-t', pane.target, '-T', ''])
     ensureTmuxTitleHeader(pane, headersByPane)
     touchedSessions.add(pane.sessionName)
