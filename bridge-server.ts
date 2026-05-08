@@ -399,7 +399,7 @@ function broadcast(room: RoomState, m: Wire) {
 
 // ── Reply routing (Codex waits for Claude) ──
 
-const MAX_PENDING_REPLY_MS = 10 * 60 * 1000
+const MAX_PENDING_REPLY_MS = 60 * 60 * 1000
 const REPLIED_PENDING_REPLY_GRACE_MS = 2 * 60 * 1000
 
 function dropPendingReply(room: RoomState, msgId: string) {

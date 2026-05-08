@@ -74,10 +74,10 @@ Add to `~/.codex/config.toml`:
 [mcp_servers.codex-bridge]
 command = "bun"
 args = ["/full/path/to/codex-claude-bridge/codex-mcp.ts"]
-tool_timeout_sec = 600
+tool_timeout_sec = 3600
 ```
 
-`tool_timeout_sec = 600` is required — `send_to_claude` can wait up to 10 minutes when the peer is still actively thinking.
+`tool_timeout_sec = 3600` is required — `send_to_claude` can wait up to 60 minutes when the peer is still actively thinking.
 
 ---
 
