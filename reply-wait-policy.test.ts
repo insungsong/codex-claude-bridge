@@ -81,9 +81,9 @@ describe('reply wait policy', () => {
       state: 'in_progress',
       createdAt: 0,
       deliveredAt: 20_000,
-      lastProgressAt: 599_000,
+      lastProgressAt: 3_599_000,
       progressNote: 'recent progress',
-    }, 601_000, undefined, true)).toBe(false)
+    }, 3_600_001, undefined, true)).toBe(false)
   })
 
   test('queued state waits only while peer is alive and bridge activity is fresh', () => {

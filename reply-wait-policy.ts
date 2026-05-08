@@ -10,7 +10,7 @@ export type ReplyWaitPolicyOptions = {
 export const DEFAULT_REPLY_WAIT_POLICY: ReplyWaitPolicyOptions = {
   baseWaitMs: 110_000,
   claimWaitMs: 30_000,
-  maxWaitMs: 600_000,
+  maxWaitMs: 60 * 60 * 1000,
   staleProgressMs: 120_000,
 }
 

@@ -11,7 +11,7 @@
 
 `bridge-server.ts`는 전체 상태를 `rooms: Map<string, RoomState>` in-memory로 보관한다. Ctrl-C 또는 크래시 시:
 
-1. `pendingReplies`의 Codex long-poll 대기자(최대 2분, `MAX_PENDING_REPLY_MS = 10 * 60 * 1000`)가 전부 `{ timeout: true, reply: null }`로 해제
+1. `pendingReplies`의 답변 대기 상태(최대 60분, `MAX_PENDING_REPLY_MS = 60 * 60 * 1000`)가 전부 `{ timeout: true, reply: null }`로 해제
 2. `pendingForCodex` 큐(Claude proactive 메시지)가 증발
 3. `RoomState.sessionToken`이 증발 → 실행 중이던 모든 MCP 프로세스가 401 → `process.exit(0)`
 4. 방 자체가 증발 — `isTombstoned` 체크도 있었던 흔적을 모름
